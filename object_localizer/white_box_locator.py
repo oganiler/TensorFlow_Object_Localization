@@ -61,7 +61,8 @@ class WhiteBoxLocator(Locator):
             )
         )
         
-        self.model.fit(ds, steps_per_epoch=self.steps_per_epoch, epochs=epochs, verbose=1)
+        history = self.model.fit(ds, steps_per_epoch=self.steps_per_epoch, epochs=epochs, verbose=1)
+        return history
 
     def predict_and_visualize(self):
         """Generate a random image, predict bounding box, and draw the result."""

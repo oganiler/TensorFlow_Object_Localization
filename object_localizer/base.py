@@ -29,12 +29,13 @@ class Locator(ABC):
       
         self.model = tf.keras.models.Model(vgg_base.input, x)
 
-    def compile_model(self, loss_func='binary_crossentropy', lr=1e-3):
+    def compile_model(self, loss_func='binary_crossentropy', lr=1e-3, metrics=None):
         """Compile the model with loss function and optimizer."""
         tf = get_tf()
         self.model.compile(
             loss=loss_func,
-            optimizer=tf.keras.optimizers.Adam(learning_rate=lr)
+            optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
+            metrics=metrics
         )  
 
     @abstractmethod

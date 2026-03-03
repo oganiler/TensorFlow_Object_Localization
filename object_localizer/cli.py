@@ -3,6 +3,7 @@ import sys
 from typing import Optional
 from .white_box_locator import WhiteBoxLocator
 from .imports import get_tf
+from . import utils
 
 def print_tf_version() -> None:
     tf = get_tf()
@@ -16,12 +17,15 @@ def execute_whitebox_detection():
     print("\nBuild The Model")
     locator.build_model()
     print("\nCompile The Model")
-    locator.compile_model(loss_func='binary_crossentropy', lr=1e-3)
+    locator.compile_model(loss_func='binary_crossentropy', lr=1e-3, metrics=['accuracy'])
 
     print(locator.model.summary())
         
     print("\nFit The Model")
-    locator.train(batch_size=64, epochs=2)
+    history = locator.train(batch_size=64, epochs=5)
+
+    print("\nPlot Training History")
+    utils.plot_training_history(history)
 
     print("\nPredict and Visualize")
     locator.predict_and_visualize()

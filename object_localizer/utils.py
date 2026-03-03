@@ -17,3 +17,27 @@ def simple_plot(title="Simple Plot"):
     plt.tight_layout()
     plt.savefig('simple_plot.png', dpi=150)
     plt.show()
+
+def plot_training_history(history):
+    """Plot loss and accuracy from a Keras training history."""
+    plt = get_plt()
+
+    metrics = [k for k in history.history.keys() if not k.startswith('val_')]
+    num_plots = len(metrics)
+
+    fig, axes = plt.subplots(1, num_plots, figsize=(6 * num_plots, 4))
+    if num_plots == 1:
+        axes = [axes]
+
+    for ax, metric in zip(axes, metrics):
+        ax.plot(history.history[metric], label=f'train {metric}')
+        if f'val_{metric}' in history.history:
+            ax.plot(history.history[f'val_{metric}'], label=f'val {metric}')
+        ax.set_title(metric)
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel(metric)
+        ax.legend()
+        ax.grid(True)
+
+    plt.tight_layout()
+    plt.show()

@@ -23,6 +23,9 @@ def execute_whitebox_detection():
     print("\nFit The Model")
     locator.train(batch_size=64, epochs=2)
 
+    print("\nPredict and Visualize")
+    locator.predict_and_visualize()
+
 def main(argv: Optional[list] = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
 

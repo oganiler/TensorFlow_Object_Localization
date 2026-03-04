@@ -21,13 +21,19 @@ class WhiteBoxLocator(Locator):
         col0 = np.random.randint(90)
 
         #bottom-right corner
-        row1 = np.random.randint(row0, 100)
-        col1 = np.random.randint(col0, 100)
+        row1 = np.random.randint(row0, self.image_height)
+        col1 = np.random.randint(col0, self.image_width)
 
         x[row0:row1, col0:col1, :] = 1
 
         #normalized targets (row0, col0, h, w)
-        targets = np.array([row0/100., col0/100., (row1 - row0)/100., (col1 - col0)/100.])
+        targets = np.array([
+            row0/self.image_height, 
+            col0/self.image_width, 
+            (row1 - row0)/self.image_height, 
+            (col1 - col0)/self.image_width
+            ], dtype=np.float64)
+
         return x, targets
 
     def image_generator(self, batch_size=64):
@@ -44,7 +50,7 @@ class WhiteBoxLocator(Locator):
 
                 yield X, Y
        
-    def train(self, batch_size=64, epochs=50):
+    def train(self, batch_size=64, epochs=5):
         """Train on synthetic white box data using image_generator."""
         tf = get_tf()
         
@@ -73,7 +79,7 @@ class WhiteBoxLocator(Locator):
         print("Ground truth (row0, col0, h, w):", targets)
 
         # Predict
-        X = np.expand_dims(x, 0)
+        X = np.expand_dims(x, 0) #(h, w, RGB) --> (batch = 1, h, w, RGB)
         p = self.model.predict(X)[0]
         print("Predicted    (row0, col0, h, w):", p)
 
@@ -81,7 +87,7 @@ class WhiteBoxLocator(Locator):
         fig, ax = plt.subplots(1)
         ax.imshow(x)
         rect = Rectangle(
-            (p[1]*100, p[0]*100),
-            p[3]*100, p[2]*100, linewidth=1, edgecolor='r', facecolor='none')
+            (p[1]*self.image_height, p[0]*self.image_width),
+            p[3]*self.image_height, p[2]*self.image_width, linewidth=1, edgecolor='r', facecolor='none')
         ax.add_patch(rect)
         plt.show()

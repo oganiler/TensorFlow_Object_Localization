@@ -10,6 +10,8 @@ class Locator(ABC):
         self.model = None
         self.num_of_output = num_of_output
         self.steps_per_epoch= steps_per_epoch
+        # Keras convention: (height, width, channels) for channels_last
+        self.image_height, self.image_width = self.input_shape[:2]
     
     def build_vgg16_backbone_model(self, vgg_weights='imagenet', output_activation_func='sigmoid'):
         """Build common VGG16 backbone (no top, with custom head)."""
@@ -24,7 +26,7 @@ class Locator(ABC):
         x = layers.Flatten()(vgg_base.output)
 
         #create FC layer with the output
-        #output is top-left corner (x1,y1) and width and height (w,h)
+        #output is top-left corner (x1,y1) and height and width (h,w) --> (x1, y1, h, w)
         x = layers.Dense(self.num_of_output, activation = output_activation_func)(x)
       
         self.model = tf.keras.models.Model(vgg_base.input, x)
@@ -39,7 +41,7 @@ class Locator(ABC):
         )  
 
     @abstractmethod
-    def image_generator(batch_size=64, num_of_batches = 50):
+    def image_generator(batch_size=64):
         pass
 
     @abstractmethod

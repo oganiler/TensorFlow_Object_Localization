@@ -22,7 +22,7 @@ def execute_whitebox_detection():
     print(locator.model.summary())
         
     print("\nFit The Model")
-    history = locator.train(batch_size=64, epochs=5)
+    history = locator.train(batch_size=64, epochs=3)
 
     print("\nPlot Training History")
     utils.plot_training_history(history)

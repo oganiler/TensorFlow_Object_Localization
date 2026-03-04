@@ -41,13 +41,12 @@ class ObjectLocator(Locator):
         X = np.expand_dims(image, 0)
         p = self.model.predict(X)[0]
 
-        h, w = image.shape[:2]
         print("Predicted (row0, col0, h, w):", p)
 
         fig, ax = plt.subplots(1)
         ax.imshow(image)
         rect = Rectangle(
-            (p[1]*w, p[0]*h),
-            p[3]*w, p[2]*h, linewidth=1, edgecolor='r', facecolor='none')
+            (p[1]*self.image_width, p[0]*self.image_height),
+            p[3]*self.image_width, p[2]*self.image_height, linewidth=1, edgecolor='r', facecolor='none')
         ax.add_patch(rect)
         plt.show()

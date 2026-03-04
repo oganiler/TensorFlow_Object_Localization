@@ -87,7 +87,7 @@ class WhiteBoxLocator(Locator):
         fig, ax = plt.subplots(1)
         ax.imshow(x)
         rect = Rectangle(
-            (p[1]*self.image_height, p[0]*self.image_width),
-            p[3]*self.image_height, p[2]*self.image_width, linewidth=1, edgecolor='r', facecolor='none')
+            (p[1]*self.image_width, p[0]*self.image_height),
+            p[3]*self.image_width, p[2]*self.image_height, linewidth=1, edgecolor='r', facecolor='none')
         ax.add_patch(rect)
         plt.show()

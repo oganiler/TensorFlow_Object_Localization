@@ -25,6 +25,7 @@
     <Compile Include="object_localizer\imports.py" />
     <Compile Include="object_localizer\base.py" />
     <Compile Include="object_localizer\cli.py" />
+    <Compile Include="object_localizer\object_locator.py" />
     <Compile Include="object_localizer\utils.py" />
     <Compile Include="object_localizer\white_box_locator.py" />
     <Compile Include="__main__.py" />

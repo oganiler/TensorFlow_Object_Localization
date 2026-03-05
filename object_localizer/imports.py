@@ -4,6 +4,12 @@ _cache = {}
 def get_tf():
     if "tf" not in _cache:
         import tensorflow as tf
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            tf.config.set_logical_device_configuration(
+                gpus[0],
+                [tf.config.LogicalDeviceConfiguration(memory_limit=7500)]  # 7.5GB
+            )
         _cache["tf"] = tf
     return _cache["tf"]
 

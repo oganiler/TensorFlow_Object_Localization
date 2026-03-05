@@ -361,3 +361,8 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd".claude/" 
+
+.claude/
+__pycache__/
+*.pyc
+.vscode/

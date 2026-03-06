@@ -25,6 +25,13 @@ def get_keras_layers():
         _cache["layers"] = layers
     return _cache["layers"]
 
+#binary_crossentropy is used in the custom loss function for stage 2, so we need to import it here
+def get_binary_crossentropy():
+    if "binary_crossentropy" not in _cache:
+        from tensorflow.keras.losses import binary_crossentropy
+        _cache["binary_crossentropy"] = binary_crossentropy
+    return _cache["binary_crossentropy"]
+
 def get_plt():
     if "plt" not in _cache:
         from matplotlib import pyplot as plt

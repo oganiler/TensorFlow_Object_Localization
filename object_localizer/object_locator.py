@@ -87,6 +87,16 @@ class ObjectLocator(Locator):
         # Get a random background patch as the canvas (instead of black)
         x = self._get_random_background_patch().astype(np.float64)
 
+        # add random option whether the object will be placed in the image or not to create some negative samples (images with no objects)
+        if np.random.rand() < 0.5:
+            # Return the background patch as is, with no object and zero targets
+            x = x / 255.0  # Normalize to [0, 1]
+            targets = np.zeros(self.num_of_output)  # No object, so targets are all zeros
+            original_coordinates = np.array([0, 0, 0, 0])  # No object coordinates
+            return x, targets, original_coordinates
+        
+        # else place the object in the image as usual
+
         #top-left corner
         row0 = np.random.randint(self.image_height - actual_obj_height)
         col0 = np.random.randint(self.image_width - actual_obj_width)
@@ -124,7 +134,8 @@ class ObjectLocator(Locator):
             row0/self.image_height, 
             col0/self.image_width, 
             (row1 - row0)/self.image_height, 
-            (col1 - col0)/self.image_width
+            (col1 - col0)/self.image_width,
+            1.0 # objectness score (1 = object exists in this image)
             ], dtype=np.float64)
 
         return x, targets, original_coordinates
@@ -166,11 +177,14 @@ class ObjectLocator(Locator):
 
         return history
 
-    def load_model(self, model_path='object_locator_model.keras'):
+    def load_model(self, model_path='object_locator_model.keras', custom_model=True):
         """Load a previously saved model, skipping training."""
         tf = get_tf()
         if os.path.exists(model_path):
-            self.model = tf.keras.models.load_model(model_path)
+            if custom_model:
+                self.model = tf.keras.models.load_model(model_path, custom_objects={'custom_loss_for_non_objects': self.custom_loss_for_non_objects})
+            else:
+                self.model = tf.keras.models.load_model(model_path)
             print(f"Model loaded from {model_path}")
             return True
         else:
@@ -204,25 +218,33 @@ class ObjectLocator(Locator):
 
         for i in range(batch_size):
             p = predictions[i]
-            original_coordinates = all_coordinates[i]
 
-            row0 = int(p[0]*self.image_height)
-            col0 = int(p[1]*self.image_width)
-            row1 = int(row0 + p[2]*self.image_height)
-            col1 = int(col0 + p[3]*self.image_width)
+            appear = p[4] > 0.5
+            print(f"\nImage {i+1} - Object Detected? {appear}")
 
-            print(f"\n--- Image {i+1} ---")
-            print("Ground truth (row0, col0, row1, col1):", original_coordinates)
-            #make an array of predicted coordinates to match the format of original_coordinates for easier comparison
-            predicted_coordinates = np.array([row0, col0, row1, col1])
-            print("Predicted    (row0, col0, row1, col1):", predicted_coordinates)
+            if appear:
+                original_coordinates = all_coordinates[i]
 
-            axes[i].imshow(X[i])
-            rect = Rectangle(
-                (p[1]*self.image_width, p[0]*self.image_height),
-                p[3]*self.image_width, p[2]*self.image_height, linewidth=1, edgecolor='r', facecolor='none')
-            axes[i].add_patch(rect)
-            axes[i].set_title(f"Image {i+1}")
+                row0 = int(p[0]*self.image_height)
+                col0 = int(p[1]*self.image_width)
+                row1 = int(row0 + p[2]*self.image_height)
+                col1 = int(col0 + p[3]*self.image_width)
+
+                print(f"\n--- Image {i+1} ---")
+                print("Ground truth (row0, col0, row1, col1):", original_coordinates)
+                #make an array of predicted coordinates to match the format of original_coordinates for easier comparison
+                predicted_coordinates = np.array([row0, col0, row1, col1])
+                print("Predicted    (row0, col0, row1, col1):", predicted_coordinates)
+
+                axes[i].imshow(X[i])
+                rect = Rectangle(
+                    (p[1]*self.image_width, p[0]*self.image_height),
+                    p[3]*self.image_width, p[2]*self.image_height, linewidth=1, edgecolor='r', facecolor='none')
+                axes[i].add_patch(rect)
+                axes[i].set_title(f"Image {i+1}")
+            else:
+                axes[i].imshow(X[i])
+                axes[i].set_title(f"Image {i+1} - No Object Detected")
 
         plt.tight_layout()
         plt.show()

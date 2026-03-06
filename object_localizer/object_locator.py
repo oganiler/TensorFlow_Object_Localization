@@ -5,6 +5,7 @@ from . import utils
 import numpy as np
 from matplotlib.patches import Rectangle
 import imageio
+from skimage.transform import resize as skimage_resize
 
 class ObjectLocator(Locator):
     """Localize actual objects in real images."""
@@ -30,6 +31,19 @@ class ObjectLocator(Locator):
         actual_obj_img = imageio.imread(self.actual_image_path)
         actual_obj = np.array(actual_obj_img)
         actual_obj_height, actual_obj_width, actual_obj_color = actual_obj_img.shape
+
+        # Random scale factor to augment training data
+        scale_factor = 0.5 + np.random.uniform(0.5, 1.5)
+        actual_obj_height = int(actual_obj_height * scale_factor)
+        actual_obj_width = int(actual_obj_width * scale_factor)
+
+        # Clamp to image bounds so the object always fits
+        actual_obj_height = min(actual_obj_height, self.image_height)
+        actual_obj_width = min(actual_obj_width, self.image_width)
+
+        # Resize the actual image to match the new scaled dimensions
+        actual_obj = (skimage_resize(actual_obj, (actual_obj_height, actual_obj_width, actual_obj_color),
+                                     preserve_range=True)).astype(np.uint8)
 
         x = np.zeros(self.input_shape)
 

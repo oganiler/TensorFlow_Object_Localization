@@ -11,23 +11,57 @@ from skimage.transform import resize as skimage_resize
 class ObjectLocator(Locator):
     """Localize actual objects in real images."""
 
-    def __init__(self, input_shape=(200, 200, 3), num_of_output=4, steps_per_epoch=50, actual_image_path = 'charmander-tight.png'):
+    def __init__(self, input_shape=(200, 200, 3), num_of_output=4, steps_per_epoch=50,
+                 actual_image_path = 'charmander-tight.png', backgrounds_dir='backgrounds'):
         """Initialize ObjectLocator with additional parameters.
-        
+
         Args:
             input_shape: Shape of input images
             num_of_output: Number of output values (bbox coords)
             steps_per_epoch: Steps per training epoch
             actual_image_path: path of the image to be trained on different locations
+            backgrounds_dir: directory containing background images (.jpg)
         """
         super().__init__(input_shape, num_of_output, steps_per_epoch)
         self.actual_image_path = actual_image_path
 
+        # Load all background images once to avoid repeated file I/O during training
+        self.background_images = []
+        for fname in sorted(os.listdir(backgrounds_dir)):
+            if fname.lower().endswith(('.jpg', '.jpeg', '.png')):
+                bg_img = np.array(imageio.imread(os.path.join(backgrounds_dir, fname)))
+                # Ensure 3-channel RGB
+                if bg_img.ndim == 2:
+                    bg_img = np.stack([bg_img] * 3, axis=-1)
+                elif bg_img.shape[2] == 4:
+                    bg_img = bg_img[:, :, :3]
+                self.background_images.append(bg_img)
+        print(f"Loaded {len(self.background_images)} background images from '{backgrounds_dir}'")
+
     def build_model(self):
         self.build_vgg16_backbone_model(vgg_weights='imagenet', output_activation_func='sigmoid')
 
+    def _get_random_background_patch(self):
+        """Select a random background image and crop a random patch of input_shape dimensions."""
+        bg = self.background_images[np.random.randint(len(self.background_images))]
+        bg_h, bg_w = bg.shape[0], bg.shape[1]
+
+        # If background is smaller than needed, resize it up
+        if bg_h < self.image_height or bg_w < self.image_width:
+            scale = max(self.image_height / bg_h, self.image_width / bg_w)
+            new_h = int(bg_h * scale) + 1
+            new_w = int(bg_w * scale) + 1
+            bg = (skimage_resize(bg, (new_h, new_w, 3), preserve_range=True)).astype(np.uint8)
+            bg_h, bg_w = bg.shape[0], bg.shape[1]
+
+        # Random crop
+        row_start = np.random.randint(0, bg_h - self.image_height + 1)
+        col_start = np.random.randint(0, bg_w - self.image_width + 1)
+
+        return bg[row_start:row_start + self.image_height, col_start:col_start + self.image_width, :]
+
     def _create_random_location_for_actual_image(self):
-        """Load and image and put it on a random location against black background.
+        """Load an image and put it on a random location against a random background.
         Returns the image and normalized targets (row0, col0, h, w)."""
         actual_obj_img = imageio.imread(self.actual_image_path)
         actual_obj = np.array(actual_obj_img)
@@ -50,7 +84,8 @@ class ObjectLocator(Locator):
         actual_obj = (skimage_resize(actual_obj, (actual_obj_height, actual_obj_width, actual_obj_color),
                                      preserve_range=True)).astype(np.uint8)
 
-        x = np.zeros(self.input_shape)
+        # Get a random background patch as the canvas (instead of black)
+        x = self._get_random_background_patch().astype(np.float64)
 
         #top-left corner
         row0 = np.random.randint(self.image_height - actual_obj_height)
@@ -61,14 +96,27 @@ class ObjectLocator(Locator):
         col1 = col0 + actual_obj_width
 
         original_coordinates  = np.array([
-                row0, 
-                col0, 
-                row1, 
+                row0,
+                col0,
+                row1,
                 col1
             ])
 
-        # put the actual image and then normalize to 0-1 
-        x[row0:row1, col0:col1, :] = actual_obj[:, :, :3]
+        # Use alpha channel to create a mask where the object exists
+        obj_rgb = actual_obj[:, :, :3]            # RGB channels
+        obj_alpha = actual_obj[:, :, 3]            # alpha channel (0 = transparent)
+        mask = (obj_alpha > 0).astype(np.uint8)    # binary mask: 1 where object exists
+        mask_3ch = mask[:, :, np.newaxis]           # (h, w, 1) for broadcasting across RGB
+
+        # Multiply mask with background to zero out where object will go, then add object
+        bg_patch = x[row0:row1, col0:col1, :]
+        # [R, G, B] * (1 - [1, 1, 1]) = [R, G, B] * [0, 0, 0] = [0, 0, 0]  ← background erased
+        # [R, G, B] * (1 - [0, 0, 0]) = [R, G, B] * [1, 1, 1] = [R, G, B]  ← background kept
+        # [0, 0, 0] + obj_rgb  =  obj_rgb     ← object placed
+        # In a well-made PNG, transparent pixels (alpha = 0) should also have RGB = [0, 0, 0]. 
+        # In that case, obj_rgb * mask_3ch is unnecessary because the transparent areas are already zero
+        x[row0:row1, col0:col1, :] = bg_patch * (1 - mask_3ch) + obj_rgb * mask_3ch
+
         x = x / 255. # assuming image has 8 bit color (max 255)
 
         #normalized targets (row0, col0, h, w)

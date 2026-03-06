@@ -367,3 +367,4 @@ __pycache__/
 *.pyc
 .vscode/
 *.keras
+/object_locator_model.keras

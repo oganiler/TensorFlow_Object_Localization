@@ -34,27 +34,30 @@ def execute_whitebox_detection():
     locator.predict_and_visualize()
 
 def execute_actual_object_detection():
-    # Stage 1:actual object localization against black background
+    # Stage 2: actual object localization against black background
     print("\n=== Stage 2: Actual Object Localization ===")
 
+    model_path = 'object_locator_model.keras'
     locator = ObjectLocator(input_shape=(200, 200, 3), num_of_output = 4, steps_per_epoch = 50, actual_image_path = 'charmander-tight.png')
 
-    print("\nBuild The Model")
-    locator.build_model()
+    # Try to load a previously saved model; train only if none exists
+    if not locator.load_model(model_path):
+        print("\nBuild The Model")
+        locator.build_model()
 
-    print("\nCompile The Model")
-    locator.compile_model(loss_func='binary_crossentropy', lr=1e-3, metrics=['accuracy'])
+        print("\nCompile The Model")
+        locator.compile_model(loss_func='binary_crossentropy', lr=1e-4, metrics=['accuracy'])
 
-    print(locator.model.summary())
-        
-    print("\nFit The Model")
-    history = locator.train(batch_size=64, epochs=2)
+        print(locator.model.summary())
 
-    print("\nPlot Training History")
-    utils.plot_training_history(history)
+        print("\nFit The Model")
+        history = locator.train(batch_size=64, epochs=3, model_path=model_path)
+
+        print("\nPlot Training History")
+        utils.plot_training_history(history)
 
     print("\nPredict and Visualize")
-    locator.predict_and_visualize()
+    locator.predict_and_visualize(batch_size=3)
 
 def main(argv: Optional[list] = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]

@@ -5,6 +5,7 @@ from . import utils
 import numpy as np
 from matplotlib.patches import Rectangle
 import imageio
+import os
 from skimage.transform import resize as skimage_resize
 
 class ObjectLocator(Locator):
@@ -90,8 +91,8 @@ class ObjectLocator(Locator):
 
                 yield X, Y
 
-    def train(self, batch_size=64, epochs=50):
-        """Train on real object data."""
+    def train(self, batch_size=64, epochs=50, model_path='object_locator_model.keras'):
+        """Train on real object data. Saves model after training."""
         tf = get_tf()
 
         if self.model is None:
@@ -107,32 +108,67 @@ class ObjectLocator(Locator):
         )
 
         history = self.model.fit(ds, steps_per_epoch=self.steps_per_epoch, epochs=epochs, verbose=1)
+
+        self.model.save(model_path)
+        print(f"Model saved to {model_path}")
+
         return history
 
-    def predict_and_visualize(self):
-        """Predict bounding box on a real image and draw the result."""
+    def load_model(self, model_path='object_locator_model.keras'):
+        """Load a previously saved model, skipping training."""
+        tf = get_tf()
+        if os.path.exists(model_path):
+            self.model = tf.keras.models.load_model(model_path)
+            print(f"Model loaded from {model_path}")
+            return True
+        else:
+            print(f"No saved model found at {model_path}")
+            return False
+
+    def predict_and_visualize(self, batch_size=1):
+        """Predict bounding boxes on random images and draw the results.
+
+        Args:
+            batch_size: Number of images to predict and visualize.
+        """
         plt = get_plt()
 
-        # Generate a random image
-        x, targets, original_coordinates = self._create_random_location_for_actual_image()
-        print("Ground truth (row0, col0, row1, col1):", original_coordinates)
+        # Generate a batch of random images
+        X = np.zeros((batch_size, *self.input_shape))
+        Y = np.zeros((batch_size, self.num_of_output))
+        all_coordinates = []
 
-        # Predict
-        X = np.expand_dims(x, 0) #(h, w, RGB) --> (batch = 1, h, w, RGB)
-        p = self.model.predict(X)[0]
+        for i in range(batch_size):
+            X[i], Y[i], coords = self._create_random_location_for_actual_image()
+            all_coordinates.append(coords)
 
-        row0 = int(p[0]*self.image_height)
-        col0 = int(p[1]*self.image_width)
-        row1 = int(row0 + p[2]*self.image_height)
-        col1 = int(col0 + p[3]*self.image_width)
-        print("Predicted    (row0, col0, row1, col1):", row0, col0, row1, col1)
-        print("loss:", -np.mean(targets*np.log(targets) + (1-targets)*np.log(1-targets)))
+        # Predict the entire batch at once
+        predictions = self.model.predict(X)
 
-        # Draw the box
-        fig, ax = plt.subplots(1)
-        ax.imshow(x)
-        rect = Rectangle(
-            (p[1]*self.image_width, p[0]*self.image_height),
-            p[3]*self.image_width, p[2]*self.image_height, linewidth=1, edgecolor='r', facecolor='none')
-        ax.add_patch(rect)
+        # Visualize each result
+        fig, axes = plt.subplots(1, batch_size, figsize=(5 * batch_size, 5))
+        if batch_size == 1:
+            axes = [axes]
+
+        for i in range(batch_size):
+            p = predictions[i]
+            original_coordinates = all_coordinates[i]
+
+            row0 = int(p[0]*self.image_height)
+            col0 = int(p[1]*self.image_width)
+            row1 = int(row0 + p[2]*self.image_height)
+            col1 = int(col0 + p[3]*self.image_width)
+
+            print(f"\n--- Image {i+1} ---")
+            print("Ground truth (row0, col0, row1, col1):", original_coordinates)
+            print("Predicted    (row0, col0, row1, col1):", row0, col0, row1, col1)
+
+            axes[i].imshow(X[i])
+            rect = Rectangle(
+                (p[1]*self.image_width, p[0]*self.image_height),
+                p[3]*self.image_width, p[2]*self.image_height, linewidth=1, edgecolor='r', facecolor='none')
+            axes[i].add_patch(rect)
+            axes[i].set_title(f"Image {i+1}")
+
+        plt.tight_layout()
         plt.show()

@@ -365,4 +365,4 @@ FodyWeavers.xsd".claude/"
 .claude/
 __pycache__/
 *.pyc
-.vscode/
+.vscode/*.keras

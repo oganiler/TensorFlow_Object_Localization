@@ -38,6 +38,10 @@ class ObjectLocator(Locator):
         actual_obj_height = int(actual_obj_height * scale_factor)
         actual_obj_width = int(actual_obj_width * scale_factor)
 
+        #random flip for data augmentation
+        if np.random.rand() < 0.5:
+            actual_obj = np.fliplr(actual_obj)
+
         # Clamp to image bounds so the object always fits
         actual_obj_height = min(actual_obj_height, self.image_height)
         actual_obj_width = min(actual_obj_width, self.image_width)
@@ -161,7 +165,9 @@ class ObjectLocator(Locator):
 
             print(f"\n--- Image {i+1} ---")
             print("Ground truth (row0, col0, row1, col1):", original_coordinates)
-            print("Predicted    (row0, col0, row1, col1):", row0, col0, row1, col1)
+            #make an array of predicted coordinates to match the format of original_coordinates for easier comparison
+            predicted_coordinates = np.array([row0, col0, row1, col1])
+            print("Predicted    (row0, col0, row1, col1):", predicted_coordinates)
 
             axes[i].imshow(X[i])
             rect = Rectangle(

@@ -12,8 +12,8 @@ class Locator(ABC):
         self.steps_per_epoch= steps_per_epoch
         # Keras convention: (height, width, channels) for channels_last
         self.image_height, self.image_width = self.input_shape[:2]
-        self.alpha_bb = 2.0 # custom loss param: weight for bounding box coordinate loss
-        self.beta_obj = 0.5 # custom loss param: weight for objectness score loss
+        self.alpha_bb = 1.0 # custom loss param: weight for bounding box coordinate loss
+        self.beta_obj = 1.0 # custom loss param: weight for objectness score loss
     
     def build_vgg16_backbone_model(self, vgg_weights='imagenet', output_activation_func='sigmoid'):
         """Build common VGG16 backbone (no top, with custom head)."""
@@ -27,24 +27,38 @@ class Locator(ABC):
         #flatten the VGG output
         x = layers.Flatten()(vgg_base.output)
 
+        # Hidden layers to learn complex mappings from VGG features to bbox + objectness
+        x = layers.Dense(256, activation='relu')(x)
+        x = layers.Dropout(0.3)(x)
+        x = layers.Dense(128, activation='relu')(x)
+        x = layers.Dropout(0.3)(x)
+
         #create FC layer with the output
-        #output is top-left corner (x1,y1) and height and width (h,w) --> (x1, y1, h, w)
+        #output is top-left corner (x1,y1) and height and width (h,w) --> (x1, y1, h, w, objectness)
         x = layers.Dense(self.num_of_output, activation = output_activation_func)(x)
       
         self.model = tf.keras.models.Model(vgg_base.input, x)
 
 
-    @staticmethod
-    def custom_loss_for_non_objects(y_true, y_pred):
-        """Custom loss to penalize false positives (non-object areas predicted as objects)."""
-        bce = get_binary_crossentropy()
-        
-        # Calculate standard binary cross-entropy loss
-        bounding_box_loss = bce(y_true[:, :-1], y_pred[:, :-1])  # Loss for bounding box coords
-        objectness_loss = bce(y_true[:, -1], y_pred[:, -1])  # Loss for objectness score
-        total_loss = (2.0 * bounding_box_loss * y_true[:, -1]) + (0.5 * objectness_loss)
+    def custom_loss_for_non_objects(self):
+        """Returns a custom loss function that uses instance-level alpha/beta weights.
 
-        return total_loss
+        When object exists (y_true[:, -1] = 1): bbox loss is weighted by alpha_bb
+        When no object (y_true[:, -1] = 0): bbox loss is zeroed out (only objectness matters)
+        """
+        alpha_bb = self.alpha_bb
+        beta_obj = self.beta_obj
+
+        def loss_fn(y_true, y_pred):
+            bce = get_binary_crossentropy()
+            bounding_box_loss = bce(y_true[:, :-1], y_pred[:, :-1])
+            objectness_loss = bce(y_true[:, -1], y_pred[:, -1])
+            # y_true[:, -1] is 1 when object exists, 0 when not → zeros out bbox loss for negatives
+            total_loss = (alpha_bb * bounding_box_loss * y_true[:, -1]) + (beta_obj * objectness_loss)
+            return total_loss
+
+        loss_fn.__name__ = 'custom_loss_for_non_objects'
+        return loss_fn
 
     def compile_model(self, loss_func='binary_crossentropy', lr=1e-3, metrics=None):
         """Compile the model with loss function and optimizer."""

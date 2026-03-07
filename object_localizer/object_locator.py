@@ -182,7 +182,7 @@ class ObjectLocator(Locator):
         tf = get_tf()
         if os.path.exists(model_path):
             if custom_model:
-                self.model = tf.keras.models.load_model(model_path, custom_objects={'custom_loss_for_non_objects': self.custom_loss_for_non_objects})
+                self.model = tf.keras.models.load_model(model_path, custom_objects={'custom_loss_for_non_objects': self.custom_loss_for_non_objects()})
             else:
                 self.model = tf.keras.models.load_model(model_path)
             print(f"Model loaded from {model_path}")

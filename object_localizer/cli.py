@@ -47,12 +47,12 @@ def execute_actual_object_detection():
         locator.build_model()
 
         print("\nCompile The Model")
-        locator.compile_model(loss_func=locator.custom_loss_for_non_objects, lr=1e-4, metrics=['accuracy'])
+        locator.compile_model(loss_func=locator.custom_loss_for_non_objects(), lr=1e-4)
 
         print(locator.model.summary())
 
         print("\nFit The Model")
-        history = locator.train(batch_size=64, epochs=10, model_path=model_path)
+        history = locator.train(batch_size=64, epochs=30, model_path=model_path)
 
         print("\nPlot Training History")
         utils.plot_training_history(history)

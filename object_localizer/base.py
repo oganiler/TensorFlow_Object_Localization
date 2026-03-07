@@ -1,6 +1,6 @@
 # base.py - abstract base class with common logic
 from abc import ABC, abstractmethod
-from .imports import get_tf, get_vgg16, get_keras_layers, get_binary_crossentropy
+from .imports import get_tf, get_vgg16, get_keras_layers, get_binary_crossentropy, get_categorical_crossentropy
 
 class Locator(ABC):
     """Base class for object localization stages."""
@@ -13,7 +13,8 @@ class Locator(ABC):
         # Keras convention: (height, width, channels) for channels_last
         self.image_height, self.image_width = self.input_shape[:2]
         self.alpha_bb = 1.0 # custom loss param: weight for bounding box coordinate loss
-        self.beta_obj = 1.0 # custom loss param: weight for objectness score loss
+        self.beta_obj = 1.0 # custom loss param: weight for classification score loss
+        self.gamma_obj = 0.5 # custom loss param: weight for objectness score loss
     
     def build_vgg16_backbone_model(self, vgg_weights='imagenet', output_activation_func='sigmoid'):
         """Build common VGG16 backbone (no top, with custom head)."""
@@ -39,6 +40,28 @@ class Locator(ABC):
       
         self.model = tf.keras.models.Model(vgg_base.input, x)
 
+    def build_vgg16_backbone_multiclass_model(self, vgg_weights='imagenet'):
+        """Build common VGG16 backbone (no top, with custom head)."""
+        tf = get_tf()
+        VGG16 = get_vgg16()
+        layers = get_keras_layers()
+        
+        vgg_base = VGG16(include_top=False, weights=vgg_weights, input_shape=self.input_shape)
+        vgg_base.trainable = False
+
+        #flatten the VGG output
+        x = layers.Flatten()(vgg_base.output)
+
+        #seperate output heads for bounding box regression and multi-class classification and objecness
+        bbox_output = layers.Dense(4, activation='sigmoid', name='bbox_output')(x) # Location
+        class_output = layers.Dense(3, activation='softmax', name='class_output')(x) # Object class (3 classes in this example)
+        objectness_output = layers.Dense(1, activation='sigmoid', name='objectness_output')(x) # Objectness score (0 or 1)
+
+        #create FC layer with the output by concatenating the separate heads
+        x = layers.Concatenate()([bbox_output, class_output, objectness_output])
+      
+        self.model = tf.keras.models.Model(vgg_base.input, x)
+
 
     def custom_loss_for_non_objects(self):
         """Returns a custom loss function that uses instance-level alpha/beta weights.
@@ -58,6 +81,28 @@ class Locator(ABC):
             return total_loss
 
         loss_fn.__name__ = 'custom_loss_for_non_objects'
+        return loss_fn
+    
+    def custom_loss_for_multiclass(self):
+        """Returns a custom loss function that combines bbox regression, multi-class classification, and objectness."""
+        alpha_bb = self.alpha_bb
+        beta_obj = self.beta_obj
+        gamma_obj = self.gamma_obj
+
+        def loss_fn(y_true, y_pred):
+            bce = get_binary_crossentropy()
+            cce = get_categorical_crossentropy()
+
+            # Assuming the output format is [bbox(4), class_probs(3), objectness(1)]
+            bounding_box_loss = bce(y_true[:, :4], y_pred[:, :4])
+            class_loss = cce(y_true[:, 4:7], y_pred[:, 4:7])
+            objectness_loss = bce(y_true[:, -1], y_pred[:, -1])
+
+            # Total loss with instance-level weighting
+            total_loss = (alpha_bb * bounding_box_loss * y_true[:, -1]) + (beta_obj * class_loss * y_true[:, -1]) + (gamma_obj * objectness_loss)
+            return total_loss
+
+        loss_fn.__name__ = 'custom_loss_for_multiclass'
         return loss_fn
 
     def compile_model(self, loss_func='binary_crossentropy', lr=1e-3, metrics=None):

@@ -32,6 +32,12 @@ def get_binary_crossentropy():
         _cache["binary_crossentropy"] = binary_crossentropy
     return _cache["binary_crossentropy"]
 
+def get_categorical_crossentropy():
+    if "categorical_crossentropy" not in _cache:
+        from tensorflow.keras.losses import categorical_crossentropy
+        _cache["categorical_crossentropy"] = categorical_crossentropy
+    return _cache["categorical_crossentropy"]
+
 def get_plt():
     if "plt" not in _cache:
         from matplotlib import pyplot as plt

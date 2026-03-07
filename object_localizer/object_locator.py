@@ -11,19 +11,18 @@ from skimage.transform import resize as skimage_resize
 class ObjectLocator(Locator):
     """Localize actual objects in real images."""
 
-    def __init__(self, input_shape=(200, 200, 3), num_of_output=4, steps_per_epoch=50,
-                 actual_image_path = 'charmander-tight.png', backgrounds_dir='backgrounds'):
+    def __init__(self, input_shape=(200, 200, 3), num_of_output=8, steps_per_epoch=50,
+                 objects_dir = 'objects', backgrounds_dir='backgrounds'):
         """Initialize ObjectLocator with additional parameters.
 
         Args:
             input_shape: Shape of input images
             num_of_output: Number of output values (bbox coords)
             steps_per_epoch: Steps per training epoch
-            actual_image_path: path of the image to be trained on different locations
+            objects_dir: directory containing object images (.png)
             backgrounds_dir: directory containing background images (.jpg)
         """
         super().__init__(input_shape, num_of_output, steps_per_epoch)
-        self.actual_image_path = actual_image_path
 
         # Load all background images once to avoid repeated file I/O during training
         self.background_images = []
@@ -38,8 +37,25 @@ class ObjectLocator(Locator):
                 self.background_images.append(bg_img)
         print(f"Loaded {len(self.background_images)} background images from '{backgrounds_dir}'")
 
-    def build_model(self):
-        self.build_vgg16_backbone_model(vgg_weights='imagenet', output_activation_func='sigmoid')
+        # Load all object images once to avoid repeated file I/O during training
+        self.object_images = []
+        for fname in sorted(os.listdir(objects_dir)):
+            if fname.lower().endswith(('.png',)):
+                obj_img = np.array(imageio.imread(os.path.join(objects_dir, fname)))
+                # Ensure 4-channel RGBA
+                if obj_img.ndim == 2:
+                    obj_img = np.stack([obj_img] * 4, axis=-1)
+                elif obj_img.shape[2] == 3:
+                    # Add alpha channel
+                    obj_img = np.concatenate([obj_img, np.ones_like(obj_img[:, :, :1])], axis=-1)
+                self.object_images.append(obj_img)
+        print(f"Loaded {len(self.object_images)} object images from '{objects_dir}'")
+
+    def build_model(self, multi_class=True):
+        if multi_class:
+            self.build_vgg16_backbone_multiclass_model(vgg_weights='imagenet')
+        else:
+            self.build_vgg16_backbone_model(vgg_weights='imagenet', output_activation_func='sigmoid')
 
     def _get_random_background_patch(self):
         """Select a random background image and crop a random patch of input_shape dimensions."""
@@ -61,9 +77,20 @@ class ObjectLocator(Locator):
         return bg[row_start:row_start + self.image_height, col_start:col_start + self.image_width, :]
 
     def _create_random_location_for_actual_image(self):
-        """Load an image and put it on a random location against a random background.
+        """Load an random object image and put it on a random location against a random background.
         Returns the image and normalized targets (row0, col0, h, w)."""
-        actual_obj_img = imageio.imread(self.actual_image_path)
+
+        # get the number of object images available and select one randomly
+        actual_obj_img = None
+        num_classes = len(self.object_images)
+        if num_classes != 3:
+            raise ValueError("Number of object images found do not match the expected number of classes.")
+        else:
+            # select a random object image from the preloaded list
+            self.class_names = ['Charmander', 'Bulbasaur', 'Squirtle']  # example class names corresponding to the object images
+            class_idx =  np.random.randint(num_classes)
+            actual_obj_img = self.object_images[class_idx]
+
         actual_obj = np.array(actual_obj_img)
         actual_obj_height, actual_obj_width, actual_obj_color = actual_obj_img.shape
 
@@ -88,7 +115,7 @@ class ObjectLocator(Locator):
         x = self._get_random_background_patch().astype(np.float64)
 
         # add random option whether the object will be placed in the image or not to create some negative samples (images with no objects)
-        if np.random.rand() < 0.5:
+        if np.random.rand() > 0.75:
             # Return the background patch as is, with no object and zero targets
             x = x / 255.0  # Normalize to [0, 1]
             targets = np.zeros(self.num_of_output)  # No object, so targets are all zeros
@@ -130,13 +157,13 @@ class ObjectLocator(Locator):
         x = x / 255. # assuming image has 8 bit color (max 255)
 
         #normalized targets (row0, col0, h, w)
-        targets = np.array([
-            row0/self.image_height, 
-            col0/self.image_width, 
-            (row1 - row0)/self.image_height, 
-            (col1 - col0)/self.image_width,
-            1.0 # objectness score (1 = object exists in this image)
-            ], dtype=np.float64)
+        targets = np.zeros(self.num_of_output)
+        targets[0] = row0/self.image_height
+        targets[1] = col0/self.image_width
+        targets[2] = (row1 - row0)/self.image_height
+        targets[3] = (col1 - col0)/self.image_width
+        targets[4 + class_idx] = 1.0 # one-hot encoding for class
+        targets[7] = 1.0 # objectness score (1 = object exists in this image)
 
         return x, targets, original_coordinates
 
@@ -182,7 +209,7 @@ class ObjectLocator(Locator):
         tf = get_tf()
         if os.path.exists(model_path):
             if custom_model:
-                self.model = tf.keras.models.load_model(model_path, custom_objects={'custom_loss_for_non_objects': self.custom_loss_for_non_objects()})
+                self.model = tf.keras.models.load_model(model_path, custom_objects={'custom_loss_for_multiclass': self.custom_loss_for_multiclass()})
             else:
                 self.model = tf.keras.models.load_model(model_path)
             print(f"Model loaded from {model_path}")
@@ -219,7 +246,7 @@ class ObjectLocator(Locator):
         for i in range(batch_size):
             p = predictions[i]
 
-            appear = p[4] > 0.5
+            appear = p[-1] > 0.5
             print(f"\nImage {i+1} - Object Detected? {appear}")
 
             if appear:
@@ -229,6 +256,10 @@ class ObjectLocator(Locator):
                 col0 = int(p[1]*self.image_width)
                 row1 = int(row0 + p[2]*self.image_height)
                 col1 = int(col0 + p[3]*self.image_width)
+
+                class_pred_idx = np.argmax(p[4:7])  # Assuming class probabilities are at indices 4, 5, 6
+                class_pred_name = self.class_names[class_pred_idx]
+                print(f"Predicted class: {class_pred_name} (index {class_pred_idx})")
 
                 print(f"\n--- Image {i+1} ---")
                 print("Ground truth (row0, col0, row1, col1):", original_coordinates)
@@ -241,7 +272,7 @@ class ObjectLocator(Locator):
                     (p[1]*self.image_width, p[0]*self.image_height),
                     p[3]*self.image_width, p[2]*self.image_height, linewidth=1, edgecolor='r', facecolor='none')
                 axes[i].add_patch(rect)
-                axes[i].set_title(f"Image {i+1}")
+                axes[i].set_title(f"Image {i+1}: {class_pred_name}")
             else:
                 axes[i].imshow(X[i])
                 axes[i].set_title(f"Image {i+1} - No Object Detected")

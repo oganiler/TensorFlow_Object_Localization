@@ -38,16 +38,16 @@ def execute_actual_object_detection():
     print("\n=== Stage 2: Actual Object Localization ===")
 
     model_path = 'object_locator_model.keras'
-    locator = ObjectLocator(input_shape=(200, 200, 3), num_of_output = 5, steps_per_epoch = 50,
-                            actual_image_path = 'charmander-tight.png', backgrounds_dir='backgrounds')
+    locator = ObjectLocator(input_shape=(200, 200, 3), num_of_output = 8, steps_per_epoch = 50,
+                            objects_dir = 'objects', backgrounds_dir='backgrounds')
 
     # Try to load a previously saved model; train only if none exists
     if not locator.load_model(model_path, custom_model=True):
         print("\nBuild The Model")
-        locator.build_model()
+        locator.build_model(multi_class=True)
 
         print("\nCompile The Model")
-        locator.compile_model(loss_func=locator.custom_loss_for_non_objects(), lr=1e-4)
+        locator.compile_model(loss_func=locator.custom_loss_for_multiclass(), lr=1e-4)
 
         print(locator.model.summary())
 

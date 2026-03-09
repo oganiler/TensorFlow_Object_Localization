@@ -38,6 +38,12 @@ def get_categorical_crossentropy():
         _cache["categorical_crossentropy"] = categorical_crossentropy
     return _cache["categorical_crossentropy"]
 
+def get_sparse_categorical_crossentropy():
+    if "sparse_categorical_crossentropy" not in _cache:
+        from tensorflow.keras.losses import sparse_categorical_crossentropy
+        _cache["sparse_categorical_crossentropy"] = sparse_categorical_crossentropy
+    return _cache["sparse_categorical_crossentropy"]
+
 def get_mean_squared_error():
     if "mean_squared_error" not in _cache:
         from tensorflow.keras.losses import mean_squared_error

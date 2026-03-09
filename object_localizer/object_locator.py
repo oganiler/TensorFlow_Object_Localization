@@ -165,7 +165,7 @@ class ObjectLocator(Locator):
         targets[1] = col0/self.image_width
         targets[2] = (row1 - row0)/self.image_height
         targets[3] = (col1 - col0)/self.image_width
-        targets[4 + class_idx] = 1.0 # one-hot encoding for class
+        targets[4] = class_idx # sparse class index (0, 1, or 2)
         targets[7] = 1.0 # objectness score (1 = object exists in this image)
 
         return x, targets, original_coordinates

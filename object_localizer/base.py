@@ -63,14 +63,16 @@ class Locator(ABC):
                 if any(layer.name.startswith(prefix) for prefix in unfreeze_prefixes):
                     layer.trainable = True
 
-        #flatten the VGG output
-        x = layers.Flatten()(vgg_base.output)
+        # Global Average Pooling: reduces (h, w, 512) → (512,) with far fewer params than Flatten
+        x = layers.GlobalAveragePooling2D()(vgg_base.output)
 
-        # Shared hidden layers to learn intermediate representations
+        # Shared hidden layers with BatchNorm for stable training
         x = layers.Dense(256, activation='relu')(x)
+        x = layers.BatchNormalization()(x)
         x = layers.Dropout(0.3)(x)
         x = layers.Dense(128, activation='relu')(x)
-        x = layers.Dropout(0.3)(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Dropout(0.5)(x)
 
         #seperate output heads for bounding box regression and multi-class classification and objecness
         bbox_output = layers.Dense(4, activation='sigmoid', name='bbox_output')(x) # Location

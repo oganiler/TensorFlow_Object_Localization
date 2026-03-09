@@ -52,6 +52,12 @@ class Locator(ABC):
         #flatten the VGG output
         x = layers.Flatten()(vgg_base.output)
 
+        # Shared hidden layers to learn intermediate representations
+        x = layers.Dense(256, activation='relu')(x)
+        x = layers.Dropout(0.3)(x)
+        x = layers.Dense(128, activation='relu')(x)
+        x = layers.Dropout(0.3)(x)
+
         #seperate output heads for bounding box regression and multi-class classification and objecness
         bbox_output = layers.Dense(4, activation='sigmoid', name='bbox_output')(x) # Location
         class_output = layers.Dense(3, activation='softmax', name='class_output')(x) # Object class (3 classes in this example)

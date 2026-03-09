@@ -1,6 +1,6 @@
 # base.py - abstract base class with common logic
 from abc import ABC, abstractmethod
-from .imports import get_tf, get_vgg16, get_keras_layers, get_binary_crossentropy, get_categorical_crossentropy
+from .imports import get_tf, get_vgg16, get_keras_layers, get_binary_crossentropy, get_categorical_crossentropy, get_mean_squared_error
 
 class Locator(ABC):
     """Base class for object localization stages."""
@@ -90,11 +90,12 @@ class Locator(ABC):
         gamma_obj = self.gamma_obj
 
         def loss_fn(y_true, y_pred):
+            mse = get_mean_squared_error()
             bce = get_binary_crossentropy()
             cce = get_categorical_crossentropy()
 
             # Assuming the output format is [bbox(4), class_probs(3), objectness(1)]
-            bounding_box_loss = bce(y_true[:, :4], y_pred[:, :4])
+            bounding_box_loss = mse(y_true[:, :4], y_pred[:, :4])
             class_loss = cce(y_true[:, 4:7], y_pred[:, 4:7])
             objectness_loss = bce(y_true[:, -1], y_pred[:, -1])
 

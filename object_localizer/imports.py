@@ -38,6 +38,12 @@ def get_categorical_crossentropy():
         _cache["categorical_crossentropy"] = categorical_crossentropy
     return _cache["categorical_crossentropy"]
 
+def get_mean_squared_error():
+    if "mean_squared_error" not in _cache:
+        from tensorflow.keras.losses import mean_squared_error
+        _cache["mean_squared_error"] = mean_squared_error
+    return _cache["mean_squared_error"]
+
 def get_plt():
     if "plt" not in _cache:
         from matplotlib import pyplot as plt

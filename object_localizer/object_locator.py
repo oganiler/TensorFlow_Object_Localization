@@ -23,6 +23,7 @@ class ObjectLocator(Locator):
             backgrounds_dir: directory containing background images (.jpg)
         """
         super().__init__(input_shape, num_of_output, steps_per_epoch)
+        self.class_names = []  # To store class names corresponding to object images
 
         # Load all background images once to avoid repeated file I/O during training
         self.background_images = []
@@ -42,6 +43,9 @@ class ObjectLocator(Locator):
         for fname in sorted(os.listdir(objects_dir)):
             if fname.lower().endswith(('.png',)):
                 obj_img = np.array(imageio.imread(os.path.join(objects_dir, fname)))
+                # append class name (without extension) to class_names list
+                class_name = os.path.splitext(fname)[0]
+                self.class_names.append(class_name)
                 # Ensure 4-channel RGBA
                 if obj_img.ndim == 2:
                     obj_img = np.stack([obj_img] * 4, axis=-1)
@@ -87,7 +91,6 @@ class ObjectLocator(Locator):
             raise ValueError("Number of object images found do not match the expected number of classes.")
         else:
             # select a random object image from the preloaded list
-            self.class_names = ['Charmander', 'Bulbasaur', 'Squirtle']  # example class names corresponding to the object images
             class_idx =  np.random.randint(num_classes)
             actual_obj_img = self.object_images[class_idx]
 

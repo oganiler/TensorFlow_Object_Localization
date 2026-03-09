@@ -42,12 +42,24 @@ def execute_actual_object_detection():
                             objects_dir = 'objects', backgrounds_dir='backgrounds')
 
     # Try to load a previously saved model; train only if none exists
-    if not locator.load_model(model_path, custom_model=True):
+    if not locator.load_model(model_path):
         print("\nBuild The Model")
         locator.build_model(multi_class=True, unfreeze_last_n_blocks=2)
 
         print("\nCompile The Model")
-        locator.compile_model(loss_func=locator.custom_loss_for_multiclass(), lr=1e-4)
+        locator.compile_model(
+            loss_func={
+                'bbox_output': 'mse',
+                'class_output': 'sparse_categorical_crossentropy',
+                'objectness_output': 'binary_crossentropy'
+            },
+            loss_weights={
+                'bbox_output': locator.alpha_bb,
+                'class_output': locator.beta_obj,
+                'objectness_output': locator.gamma_obj
+            },
+            lr=1e-4
+        )
 
         print(locator.model.summary())
 

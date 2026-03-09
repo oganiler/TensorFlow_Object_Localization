@@ -121,7 +121,11 @@ class ObjectLocator(Locator):
         if np.random.rand() > 0.75:
             # Return the background patch as is, with no object and zero targets
             x = x / 255.0  # Normalize to [0, 1]
-            targets = np.zeros(self.num_of_output)  # No object, so targets are all zeros
+            targets = {
+                'bbox_output': np.zeros(4, dtype=np.float32),
+                'class_output': np.float32(0),
+                'objectness_output': np.array([0.0], dtype=np.float32)
+            }
             original_coordinates = np.array([0, 0, 0, 0])  # No object coordinates
             return x, targets, original_coordinates
         
@@ -160,13 +164,16 @@ class ObjectLocator(Locator):
         x = x / 255. # assuming image has 8 bit color (max 255)
 
         #normalized targets (row0, col0, h, w)
-        targets = np.zeros(self.num_of_output)
-        targets[0] = row0/self.image_height
-        targets[1] = col0/self.image_width
-        targets[2] = (row1 - row0)/self.image_height
-        targets[3] = (col1 - col0)/self.image_width
-        targets[4] = class_idx # sparse class index (0, 1, or 2)
-        targets[7] = 1.0 # objectness score (1 = object exists in this image)
+        targets = {
+            'bbox_output': np.array([
+                row0/self.image_height,
+                col0/self.image_width,
+                (row1 - row0)/self.image_height,
+                (col1 - col0)/self.image_width
+            ], dtype=np.float32),
+            'class_output': np.float32(class_idx),  # sparse class index (0, 1, or 2)
+            'objectness_output': np.array([1.0], dtype=np.float32)  # object exists
+        }
 
         return x, targets, original_coordinates
 
@@ -177,44 +184,50 @@ class ObjectLocator(Locator):
             # Each epoch will have num_of_batches
             for _ in range(num_of_batches):
                 X = np.zeros((batch_size, *self.input_shape))
-                Y = np.zeros((batch_size, self.num_of_output))
+                Y_bbox = np.zeros((batch_size, 4), dtype=np.float32)
+                Y_class = np.zeros(batch_size, dtype=np.float32)
+                Y_obj = np.zeros((batch_size, 1), dtype=np.float32)
+                # Sample weights: objectness flag masks bbox and class losses for negative samples
+                W_bbox = np.zeros(batch_size, dtype=np.float32)
+                W_class = np.zeros(batch_size, dtype=np.float32)
 
                 for i in range(batch_size):
-                    X[i], Y[i], _ = self._create_random_location_for_actual_image()
+                    x, targets, _ = self._create_random_location_for_actual_image()
+                    X[i] = x
+                    Y_bbox[i] = targets['bbox_output']
+                    Y_class[i] = targets['class_output']
+                    Y_obj[i] = targets['objectness_output']
+                    W_bbox[i] = targets['objectness_output'][0]
+                    W_class[i] = targets['objectness_output'][0]
 
-                yield X, Y
+                yield (
+                    X,
+                    {'bbox_output': Y_bbox, 'class_output': Y_class, 'objectness_output': Y_obj},
+                    {'bbox_output': W_bbox, 'class_output': W_class}
+                )
 
     def train(self, batch_size=64, epochs=50, model_path='object_locator_model.keras'):
         """Train on real object data. Saves model after training."""
-        tf = get_tf()
-
         if self.model is None:
             self.build_model()
 
-        ds = tf.data.Dataset.from_generator(
-            lambda: self.image_generator(batch_size=batch_size),
-            output_types=(tf.float32, tf.float32),
-            output_shapes=(
-                (batch_size, *self.input_shape),
-                (batch_size, self.num_of_output)
-            )
+        history = self.model.fit(
+            self.image_generator(batch_size=batch_size),
+            steps_per_epoch=self.steps_per_epoch,
+            epochs=epochs,
+            verbose=1
         )
-
-        history = self.model.fit(ds, steps_per_epoch=self.steps_per_epoch, epochs=epochs, verbose=1)
 
         self.model.save(model_path)
         print(f"Model saved to {model_path}")
 
         return history
 
-    def load_model(self, model_path='object_locator_model.keras', custom_model=True):
+    def load_model(self, model_path='object_locator_model.keras'):
         """Load a previously saved model, skipping training."""
         tf = get_tf()
         if os.path.exists(model_path):
-            if custom_model:
-                self.model = tf.keras.models.load_model(model_path, custom_objects={'custom_loss_for_multiclass': self.custom_loss_for_multiclass()})
-            else:
-                self.model = tf.keras.models.load_model(model_path)
+            self.model = tf.keras.models.load_model(model_path)
             print(f"Model loaded from {model_path}")
             return True
         else:
@@ -231,15 +244,16 @@ class ObjectLocator(Locator):
 
         # Generate a batch of random images
         X = np.zeros((batch_size, *self.input_shape))
-        Y = np.zeros((batch_size, self.num_of_output))
         all_coordinates = []
 
         for i in range(batch_size):
-            X[i], Y[i], coords = self._create_random_location_for_actual_image()
+            x, _, coords = self._create_random_location_for_actual_image()
+            X[i] = x
             all_coordinates.append(coords)
 
-        # Predict the entire batch at once
-        predictions = self.model.predict(X)
+        # Predict the entire batch at once — returns list of 3 arrays:
+        # [bbox_preds(batch,4), class_preds(batch,3), obj_preds(batch,1)]
+        bbox_preds, class_preds, obj_preds = self.model.predict(X)
 
         # Visualize each result
         fig, axes = plt.subplots(1, batch_size, figsize=(5 * batch_size, 5))
@@ -247,33 +261,31 @@ class ObjectLocator(Locator):
             axes = [axes]
 
         for i in range(batch_size):
-            p = predictions[i]
-
-            appear = p[-1] > 0.5
+            appear = obj_preds[i, 0] > 0.5
             print(f"\nImage {i+1} - Object Detected? {appear}")
 
             if appear:
                 original_coordinates = all_coordinates[i]
 
-                row0 = int(p[0]*self.image_height)
-                col0 = int(p[1]*self.image_width)
-                row1 = int(row0 + p[2]*self.image_height)
-                col1 = int(col0 + p[3]*self.image_width)
+                row0 = int(bbox_preds[i, 0] * self.image_height)
+                col0 = int(bbox_preds[i, 1] * self.image_width)
+                row1 = int(row0 + bbox_preds[i, 2] * self.image_height)
+                col1 = int(col0 + bbox_preds[i, 3] * self.image_width)
 
-                class_pred_idx = np.argmax(p[4:7])  # Assuming class probabilities are at indices 4, 5, 6
+                class_pred_idx = np.argmax(class_preds[i])
                 class_pred_name = self.class_names[class_pred_idx]
                 print(f"Predicted class: {class_pred_name} (index {class_pred_idx})")
 
                 print(f"\n--- Image {i+1} ---")
                 print("Ground truth (row0, col0, row1, col1):", original_coordinates)
-                #make an array of predicted coordinates to match the format of original_coordinates for easier comparison
                 predicted_coordinates = np.array([row0, col0, row1, col1])
                 print("Predicted    (row0, col0, row1, col1):", predicted_coordinates)
 
                 axes[i].imshow(X[i])
                 rect = Rectangle(
-                    (p[1]*self.image_width, p[0]*self.image_height),
-                    p[3]*self.image_width, p[2]*self.image_height, linewidth=1, edgecolor='r', facecolor='none')
+                    (bbox_preds[i, 1] * self.image_width, bbox_preds[i, 0] * self.image_height),
+                    bbox_preds[i, 3] * self.image_width, bbox_preds[i, 2] * self.image_height,
+                    linewidth=1, edgecolor='r', facecolor='none')
                 axes[i].add_patch(rect)
                 axes[i].set_title(f"Image {i+1}: {class_pred_name}")
             else:

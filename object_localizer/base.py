@@ -1,6 +1,6 @@
 # base.py - abstract base class with common logic
 from abc import ABC, abstractmethod
-from .imports import get_tf, get_vgg16, get_keras_layers, get_binary_crossentropy, get_sparse_categorical_crossentropy, get_mean_squared_error
+from .imports import get_tf, get_vgg16, get_keras_layers, get_binary_crossentropy
 
 class Locator(ABC):
     """Base class for object localization stages."""
@@ -77,10 +77,11 @@ class Locator(ABC):
         class_output = layers.Dense(3, activation='softmax', name='class_output')(x) # Object class (3 classes in this example)
         objectness_output = layers.Dense(1, activation='sigmoid', name='objectness_output')(x) # Objectness score (0 or 1)
 
-        #create FC layer with the output by concatenating the separate heads
-        x = layers.Concatenate()([bbox_output, class_output, objectness_output])
-      
-        self.model = tf.keras.models.Model(vgg_base.input, x)
+        # Multi-output model: each head is a separate output with its own loss
+        self.model = tf.keras.models.Model(
+            inputs=vgg_base.input,
+            outputs=[bbox_output, class_output, objectness_output]
+        )
 
 
     def custom_loss_for_non_objects(self):
@@ -103,38 +104,22 @@ class Locator(ABC):
         loss_fn.__name__ = 'custom_loss_for_non_objects'
         return loss_fn
     
-    def custom_loss_for_multiclass(self):
-        """Returns a custom loss function that combines bbox regression, multi-class classification, and objectness."""
-        alpha_bb = self.alpha_bb
-        beta_obj = self.beta_obj
-        gamma_obj = self.gamma_obj
+    def compile_model(self, loss_func='binary_crossentropy', lr=1e-3, metrics=None, loss_weights=None):
+        """Compile the model with loss function and optimizer.
 
-        def loss_fn(y_true, y_pred):
-            mse = get_mean_squared_error()
-            bce = get_binary_crossentropy()
-            scce = get_sparse_categorical_crossentropy()
-
-            # Label format:  [bbox(4), class_idx(1), unused(2), objectness(1)]
-            # Output format: [bbox(4), class_probs(3), objectness(1)]
-            bounding_box_loss = mse(y_true[:, :4], y_pred[:, :4])
-            class_loss = scce(y_true[:, 4], y_pred[:, 4:7])
-            objectness_loss = bce(y_true[:, -1], y_pred[:, -1])
-
-            # Total loss with instance-level weighting
-            total_loss = (alpha_bb * bounding_box_loss * y_true[:, -1]) + (beta_obj * class_loss * y_true[:, -1]) + (gamma_obj * objectness_loss)
-            return total_loss
-
-        loss_fn.__name__ = 'custom_loss_for_multiclass'
-        return loss_fn
-
-    def compile_model(self, loss_func='binary_crossentropy', lr=1e-3, metrics=None):
-        """Compile the model with loss function and optimizer."""
+        Args:
+            loss_func: Loss function name, or dict of {output_name: loss} for multi-output models.
+            lr: Learning rate.
+            metrics: Metrics to track.
+            loss_weights: Optional dict of {output_name: weight} for multi-output models.
+        """
         tf = get_tf()
         self.model.compile(
             loss=loss_func,
             optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
-            metrics=metrics
-        )  
+            metrics=metrics,
+            loss_weights=loss_weights
+        )
 
     @abstractmethod
     def image_generator(batch_size=64):

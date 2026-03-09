@@ -40,14 +40,28 @@ class Locator(ABC):
       
         self.model = tf.keras.models.Model(vgg_base.input, x)
 
-    def build_vgg16_backbone_multiclass_model(self, vgg_weights='imagenet'):
-        """Build common VGG16 backbone (no top, with custom head)."""
+    def build_vgg16_backbone_multiclass_model(self, vgg_weights='imagenet', unfreeze_last_n_blocks=0):
+        """Build common VGG16 backbone (no top, with custom head).
+
+        Args:
+            vgg_weights: Pretrained weights to use ('imagenet' or None).
+            unfreeze_last_n_blocks: Number of VGG16 conv blocks to unfreeze from the top (0-5).
+                0 = all frozen, 1 = block5, 2 = block4+block5, etc.
+        """
         tf = get_tf()
         VGG16 = get_vgg16()
         layers = get_keras_layers()
-        
+
         vgg_base = VGG16(include_top=False, weights=vgg_weights, input_shape=self.input_shape)
         vgg_base.trainable = False
+
+        # Unfreeze the last N conv blocks for fine-tuning
+        if unfreeze_last_n_blocks > 0:
+            block_prefixes = ['block5', 'block4', 'block3', 'block2', 'block1']
+            unfreeze_prefixes = block_prefixes[:unfreeze_last_n_blocks]
+            for layer in vgg_base.layers:
+                if any(layer.name.startswith(prefix) for prefix in unfreeze_prefixes):
+                    layer.trainable = True
 
         #flatten the VGG output
         x = layers.Flatten()(vgg_base.output)

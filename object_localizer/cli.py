@@ -44,7 +44,7 @@ def execute_actual_object_detection():
     # Try to load a previously saved model; train only if none exists
     if not locator.load_model(model_path, custom_model=True):
         print("\nBuild The Model")
-        locator.build_model(multi_class=True)
+        locator.build_model(multi_class=True, unfreeze_last_n_blocks=2)
 
         print("\nCompile The Model")
         locator.compile_model(loss_func=locator.custom_loss_for_multiclass(), lr=1e-4)
@@ -52,7 +52,7 @@ def execute_actual_object_detection():
         print(locator.model.summary())
 
         print("\nFit The Model")
-        history = locator.train(batch_size=64, epochs=5, model_path=model_path)
+        history = locator.train(batch_size=64, epochs=10, model_path=model_path)
 
         print("\nPlot Training History")
         utils.plot_training_history(history)

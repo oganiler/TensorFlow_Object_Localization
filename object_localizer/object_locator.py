@@ -55,9 +55,9 @@ class ObjectLocator(Locator):
                 self.object_images.append(obj_img)
         print(f"Loaded {len(self.object_images)} object images from '{objects_dir}'")
 
-    def build_model(self, multi_class=True):
+    def build_model(self, multi_class=True, unfreeze_last_n_blocks=0):
         if multi_class:
-            self.build_vgg16_backbone_multiclass_model(vgg_weights='imagenet')
+            self.build_vgg16_backbone_multiclass_model(vgg_weights='imagenet', unfreeze_last_n_blocks=unfreeze_last_n_blocks)
         else:
             self.build_vgg16_backbone_model(vgg_weights='imagenet', output_activation_func='sigmoid')
 

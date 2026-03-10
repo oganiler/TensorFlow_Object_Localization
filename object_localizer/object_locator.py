@@ -81,8 +81,8 @@ class ObjectLocator(Locator):
         return bg[row_start:row_start + self.image_height, col_start:col_start + self.image_width, :]
 
     def _create_random_location_for_actual_image(self):
-        """Load an random object image and put it on a random location against a random background.
-        Returns the image and normalized targets (row0, col0, h, w)."""
+        """Load a random object image and put it on a random location against a random background.
+        Returns the image and grid-based targets (per-cell predictions, YOLO-style)."""
 
         # get the number of object images available and select one randomly
         actual_obj_img = None
@@ -117,18 +117,22 @@ class ObjectLocator(Locator):
         # Get a random background patch as the canvas (instead of black)
         x = self._get_random_background_patch().astype(np.float64)
 
+        # Grid cell dimensions in pixels
+        cell_h = self.image_height / self.grid_h  # ~33.3 px for 200/6
+        cell_w = self.image_width / self.grid_w
+
         # add random option whether the object will be placed in the image or not to create some negative samples (images with no objects)
         if np.random.rand() > 0.75:
-            # Return the background patch as is, with no object and zero targets
+            # Return the background patch as is, with no object — all cells empty
             x = x / 255.0  # Normalize to [0, 1]
             targets = {
-                'bbox_output': np.zeros(4, dtype=np.float32),
-                'class_output': np.float32(0),
-                'objectness_output': np.array([0.0], dtype=np.float32)
+                'bbox_output': np.zeros((self.num_cells, 4), dtype=np.float32),
+                'class_output': np.zeros(self.num_cells, dtype=np.float32),
+                'objectness_output': np.zeros((self.num_cells, 1), dtype=np.float32)
             }
             original_coordinates = np.array([0, 0, 0, 0])  # No object coordinates
             return x, targets, original_coordinates
-        
+
         # else place the object in the image as usual
 
         #top-left corner
@@ -154,42 +158,61 @@ class ObjectLocator(Locator):
 
         # Multiply mask with background to zero out where object will go, then add object
         bg_patch = x[row0:row1, col0:col1, :]
-        # [R, G, B] * (1 - [1, 1, 1]) = [R, G, B] * [0, 0, 0] = [0, 0, 0]  ← background erased
-        # [R, G, B] * (1 - [0, 0, 0]) = [R, G, B] * [1, 1, 1] = [R, G, B]  ← background kept
-        # [0, 0, 0] + obj_rgb  =  obj_rgb     ← object placed
-        # In a well-made PNG, transparent pixels (alpha = 0) should also have RGB = [0, 0, 0]. 
-        # In that case, obj_rgb * mask_3ch is unnecessary because the transparent areas are already zero
         x[row0:row1, col0:col1, :] = bg_patch * (1 - mask_3ch) + obj_rgb * mask_3ch
 
         x = x / 255. # assuming image has 8 bit color (max 255)
 
-        #normalized targets (row0, col0, h, w)
+        # === YOLO-style cell-relative target encoding ===
+        # Find object center
+        center_row = (row0 + row1) / 2.0
+        center_col = (col0 + col1) / 2.0
+
+        # Determine responsible cell (the cell whose region contains the object center)
+        resp_cell_row = int(center_row / cell_h)
+        resp_cell_col = int(center_col / cell_w)
+        # Clamp to grid bounds (safety)
+        resp_cell_row = min(resp_cell_row, self.grid_h - 1)
+        resp_cell_col = min(resp_cell_col, self.grid_w - 1)
+        resp_cell_idx = resp_cell_row * self.grid_w + resp_cell_col  # flat index 0..35
+
+        # Cell-relative bbox: tx, ty are center offsets within the responsible cell [0,1]
+        # tw, th are object size relative to full image [0,1]
+        tx = (center_col - resp_cell_col * cell_w) / cell_w  # offset within cell [0,1]
+        ty = (center_row - resp_cell_row * cell_h) / cell_h  # offset within cell [0,1]
+        tw = (col1 - col0) / self.image_width                # width relative to image [0,1]
+        th = (row1 - row0) / self.image_height                # height relative to image [0,1]
+
+        # Build grid-shaped targets — all zeros except the responsible cell
+        bbox_targets = np.zeros((self.num_cells, 4), dtype=np.float32)
+        class_targets = np.zeros(self.num_cells, dtype=np.float32)
+        obj_targets = np.zeros((self.num_cells, 1), dtype=np.float32)
+
+        bbox_targets[resp_cell_idx] = [tx, ty, tw, th]
+        class_targets[resp_cell_idx] = class_idx  # sparse class index (0, 1, or 2)
+        obj_targets[resp_cell_idx] = 1.0           # object exists in this cell
+
         targets = {
-            'bbox_output': np.array([
-                row0/self.image_height,
-                col0/self.image_width,
-                (row1 - row0)/self.image_height,
-                (col1 - col0)/self.image_width
-            ], dtype=np.float32),
-            'class_output': np.float32(class_idx),  # sparse class index (0, 1, or 2)
-            'objectness_output': np.array([1.0], dtype=np.float32)  # object exists
+            'bbox_output': bbox_targets,
+            'class_output': class_targets,
+            'objectness_output': obj_targets
         }
 
         return x, targets, original_coordinates
 
     def image_generator(self, batch_size=64):
-        # generate image input and the targets to train randomly
+        # generate image input and the grid-based targets to train randomly
         num_of_batches =  self.steps_per_epoch
         while True:
             # Each epoch will have num_of_batches
             for _ in range(num_of_batches):
                 X = np.zeros((batch_size, *self.input_shape))
-                Y_bbox = np.zeros((batch_size, 4), dtype=np.float32)
-                Y_class = np.zeros(batch_size, dtype=np.float32)
-                Y_obj = np.zeros((batch_size, 1), dtype=np.float32)
-                # Sample weights: objectness flag masks bbox and class losses for negative samples
-                W_bbox = np.zeros(batch_size, dtype=np.float32)
-                W_class = np.zeros(batch_size, dtype=np.float32)
+                Y_bbox = np.zeros((batch_size, self.num_cells, 4), dtype=np.float32)
+                Y_class = np.zeros((batch_size, self.num_cells), dtype=np.float32)
+                Y_obj = np.zeros((batch_size, self.num_cells, 1), dtype=np.float32)
+                # Per-cell sample weights: 1.0 at responsible cell, 0.0 elsewhere
+                # This masks bbox and class losses for cells with no object
+                W_bbox = np.zeros((batch_size, self.num_cells), dtype=np.float32)
+                W_class = np.zeros((batch_size, self.num_cells), dtype=np.float32)
 
                 for i in range(batch_size):
                     x, targets, _ = self._create_random_location_for_actual_image()
@@ -197,8 +220,9 @@ class ObjectLocator(Locator):
                     Y_bbox[i] = targets['bbox_output']
                     Y_class[i] = targets['class_output']
                     Y_obj[i] = targets['objectness_output']
-                    W_bbox[i] = targets['objectness_output'][0]
-                    W_class[i] = targets['objectness_output'][0]
+                    # objectness_output is (num_cells, 1) — squeeze to (num_cells,) for sample weights
+                    W_bbox[i] = targets['objectness_output'][:, 0]
+                    W_class[i] = targets['objectness_output'][:, 0]
 
                 yield (
                     X,
@@ -235,7 +259,10 @@ class ObjectLocator(Locator):
             return False
 
     def predict_and_visualize(self, batch_size=1):
-        """Predict bounding boxes on random images and draw the results.
+        """Predict bounding boxes on random images and draw ALL activated cell predictions.
+
+        Without NMS, multiple overlapping boxes may appear around the object — this is
+        expected and shows the raw per-cell output of the grid.
 
         Args:
             batch_size: Number of images to predict and visualize.
@@ -252,8 +279,15 @@ class ObjectLocator(Locator):
             all_coordinates.append(coords)
 
         # Predict the entire batch at once — returns list of 3 arrays:
-        # [bbox_preds(batch,4), class_preds(batch,3), obj_preds(batch,1)]
+        # [bbox_preds(batch,36,4), class_preds(batch,36,3), obj_preds(batch,36,1)]
         bbox_preds, class_preds, obj_preds = self.model.predict(X)
+
+        # Grid cell dimensions in pixels
+        cell_h = self.image_height / self.grid_h
+        cell_w = self.image_width / self.grid_w
+
+        # Color map for classes
+        class_colors = ['r', 'g', 'b']  # one color per class
 
         # Visualize each result
         fig, axes = plt.subplots(1, batch_size, figsize=(5 * batch_size, 5))
@@ -261,36 +295,62 @@ class ObjectLocator(Locator):
             axes = [axes]
 
         for i in range(batch_size):
-            appear = obj_preds[i, 0] > 0.5
-            print(f"\nImage {i+1} - Object Detected? {appear}")
+            axes[i].imshow(X[i])
+            original_coordinates = all_coordinates[i]
+            detected_count = 0
 
-            if appear:
-                original_coordinates = all_coordinates[i]
+            # Loop through all 36 cells — draw boxes for any cell with objectness > 0.5
+            for cell_idx in range(self.num_cells):
+                obj_score = obj_preds[i, cell_idx, 0]
+                if obj_score <= 0.5:
+                    continue
 
-                row0 = int(bbox_preds[i, 0] * self.image_height)
-                col0 = int(bbox_preds[i, 1] * self.image_width)
-                row1 = int(row0 + bbox_preds[i, 2] * self.image_height)
-                col1 = int(col0 + bbox_preds[i, 3] * self.image_width)
+                detected_count += 1
 
-                class_pred_idx = np.argmax(class_preds[i])
+                # Decode cell-relative bbox → image coordinates
+                cell_row = cell_idx // self.grid_w
+                cell_col = cell_idx % self.grid_w
+
+                tx, ty, tw, th = bbox_preds[i, cell_idx]
+
+                # Center of object in image coordinates
+                center_col = (cell_col + tx) * cell_w
+                center_row = (cell_row + ty) * cell_h
+                obj_width = tw * self.image_width
+                obj_height = th * self.image_height
+
+                # Top-left corner for Rectangle (col, row)
+                rect_col0 = center_col - obj_width / 2
+                rect_row0 = center_row - obj_height / 2
+
+                # Class prediction for this cell
+                class_pred_idx = np.argmax(class_preds[i, cell_idx])
                 class_pred_name = self.class_names[class_pred_idx]
-                print(f"Predicted class: {class_pred_name} (index {class_pred_idx})")
+                color = class_colors[class_pred_idx % len(class_colors)]
 
-                print(f"\n--- Image {i+1} ---")
-                print("Ground truth (row0, col0, row1, col1):", original_coordinates)
-                predicted_coordinates = np.array([row0, col0, row1, col1])
-                print("Predicted    (row0, col0, row1, col1):", predicted_coordinates)
-
-                axes[i].imshow(X[i])
+                # Draw box with transparency based on confidence
+                alpha = float(np.clip(obj_score, 0.3, 1.0))
                 rect = Rectangle(
-                    (bbox_preds[i, 1] * self.image_width, bbox_preds[i, 0] * self.image_height),
-                    bbox_preds[i, 3] * self.image_width, bbox_preds[i, 2] * self.image_height,
-                    linewidth=1, edgecolor='r', facecolor='none')
+                    (rect_col0, rect_row0), obj_width, obj_height,
+                    linewidth=2, edgecolor=color, facecolor='none', alpha=alpha)
                 axes[i].add_patch(rect)
-                axes[i].set_title(f"Image {i+1}: {class_pred_name}")
-            else:
-                axes[i].imshow(X[i])
-                axes[i].set_title(f"Image {i+1} - No Object Detected")
+
+                # Label with class name and confidence
+                axes[i].text(rect_col0, rect_row0 - 2,
+                           f"{class_pred_name} {obj_score:.2f}",
+                           fontsize=6, color=color, fontweight='bold',
+                           bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
+
+                print(f"  Cell [{cell_row},{cell_col}] → {class_pred_name} "
+                      f"(obj={obj_score:.3f}) bbox=({tx:.2f},{ty:.2f},{tw:.2f},{th:.2f})")
+
+            print(f"\nImage {i+1} — {detected_count} cells activated (out of {self.num_cells})")
+            print(f"  Ground truth (row0, col0, row1, col1): {original_coordinates}")
+
+            title = f"Image {i+1}: {detected_count} detections"
+            if detected_count == 0:
+                title = f"Image {i+1} — No Object Detected"
+            axes[i].set_title(title)
 
         plt.tight_layout()
         plt.show()

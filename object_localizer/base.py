@@ -15,6 +15,11 @@ class Locator(ABC):
         self.alpha_bb = 1.0 # custom loss param: weight for bounding box coordinate loss
         self.beta_obj = 1.0 # custom loss param: weight for classification score loss
         self.gamma_obj = 0.5 # custom loss param: weight for objectness score loss
+        # Grid dimensions — VGG16 with 5 max-pools shrinks spatial dims by 2^5 = 32
+        # For 200×200 input: 200/32 = 6.25 → VGG outputs (6,6,512)
+        self.grid_h = self.image_height // 32  # 6 for 200px
+        self.grid_w = self.image_width // 32   # 6 for 200px
+        self.num_cells = self.grid_h * self.grid_w  # 36 cells total
     
     def build_vgg16_backbone_model(self, vgg_weights='imagenet', output_activation_func='sigmoid'):
         """Build common VGG16 backbone (no top, with custom head)."""
@@ -72,18 +77,22 @@ class Locator(ABC):
         x = layers.BatchNormalization()(x)
         x = layers.Dropout(0.5)(x)
 
-        # 1x1 Conv2D output heads: predict per-cell → (6,6,filters)
-        # Then GAP collapses to single predictions (temporary — removed in Step 2)
+        # 1x1 Conv2D output heads: predict per-cell → (grid_h, grid_w, filters)
+        # Each of the grid_h×grid_w cells makes its own independent prediction
         bbox_conv = layers.Conv2D(4, (1, 1), activation='sigmoid', name='bbox_conv')(x)
-        bbox_output = layers.GlobalAveragePooling2D(name='bbox_output')(bbox_conv)
+        # Reshape (6,6,4) → (36,4) — one bbox prediction per cell
+        bbox_output = layers.Reshape((self.num_cells, 4), name='bbox_output')(bbox_conv)
 
         class_conv = layers.Conv2D(3, (1, 1), activation='softmax', name='class_conv')(x)
-        class_output = layers.GlobalAveragePooling2D(name='class_output')(class_conv)
+        # Reshape (6,6,3) → (36,3) — one class distribution per cell
+        class_output = layers.Reshape((self.num_cells, 3), name='class_output')(class_conv)
 
         obj_conv = layers.Conv2D(1, (1, 1), activation='sigmoid', name='obj_conv')(x)
-        objectness_output = layers.GlobalAveragePooling2D(name='objectness_output')(obj_conv)
+        # Reshape (6,6,1) → (36,1) — one objectness score per cell
+        objectness_output = layers.Reshape((self.num_cells, 1), name='objectness_output')(obj_conv)
 
         # Multi-output model: each head is a separate output with its own loss
+        # Output shapes: bbox(batch,36,4), class(batch,36,3), obj(batch,36,1)
         self.model = tf.keras.models.Model(
             inputs=vgg_base.input,
             outputs=[bbox_output, class_output, objectness_output]

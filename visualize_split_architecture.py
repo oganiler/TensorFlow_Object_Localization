@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import numpy as np
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 12))
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 16))
 
 # Colors
 COLOR_BBOX = '#E74C3C'

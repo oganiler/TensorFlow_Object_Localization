@@ -63,23 +63,25 @@ class Locator(ABC):
                 if any(layer.name.startswith(prefix) for prefix in unfreeze_prefixes):
                     layer.trainable = True
 
-        # === Localization path: Flatten preserves spatial info (WHERE things are) ===
-        loc_path = layers.Flatten()(vgg_base.output)
-        loc_path = layers.Dense(256, activation='relu')(loc_path)
-        loc_path = layers.BatchNormalization()(loc_path)
-        loc_path = layers.Dropout(0.3)(loc_path)
-        loc_path = layers.Dense(128, activation='relu')(loc_path)
-        loc_path = layers.BatchNormalization()(loc_path)
-        loc_path = layers.Dropout(0.5)(loc_path)
-        bbox_output = layers.Dense(4, activation='sigmoid', name='bbox_output')(loc_path)
+        # === Convolutional head: keeps (6,6) spatial grid alive ===
+        # VGG output: (batch, 6, 6, 512) — no Flatten or GAP
+        x = layers.Conv2D(256, (3, 3), padding='same', activation='relu')(vgg_base.output)
+        x = layers.BatchNormalization()(x)
+        x = layers.Dropout(0.3)(x)
+        x = layers.Conv2D(128, (3, 3), padding='same', activation='relu')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Dropout(0.5)(x)
 
-        # === Classification path: GAP focuses on WHAT is present (not where) ===
-        cls_path = layers.GlobalAveragePooling2D()(vgg_base.output)
-        cls_path = layers.Dense(128, activation='relu')(cls_path)
-        cls_path = layers.BatchNormalization()(cls_path)
-        cls_path = layers.Dropout(0.5)(cls_path)
-        class_output = layers.Dense(3, activation='softmax', name='class_output')(cls_path)
-        objectness_output = layers.Dense(1, activation='sigmoid', name='objectness_output')(cls_path)
+        # 1x1 Conv2D output heads: predict per-cell → (6,6,filters)
+        # Then GAP collapses to single predictions (temporary — removed in Step 2)
+        bbox_conv = layers.Conv2D(4, (1, 1), activation='sigmoid', name='bbox_conv')(x)
+        bbox_output = layers.GlobalAveragePooling2D(name='bbox_output')(bbox_conv)
+
+        class_conv = layers.Conv2D(3, (1, 1), activation='softmax', name='class_conv')(x)
+        class_output = layers.GlobalAveragePooling2D(name='class_output')(class_conv)
+
+        obj_conv = layers.Conv2D(1, (1, 1), activation='sigmoid', name='obj_conv')(x)
+        objectness_output = layers.GlobalAveragePooling2D(name='objectness_output')(obj_conv)
 
         # Multi-output model: each head is a separate output with its own loss
         self.model = tf.keras.models.Model(

@@ -61,14 +61,14 @@ def execute_actual_object_detection():
             lr=1e-4
         )
 
-        print(locator.model.summary())
-
         print("\nFit The Model")
-        history = locator.train(batch_size=64, epochs=40, model_path=model_path)
+        history = locator.train(batch_size=64, epochs=20, model_path=model_path)
 
         print("\nPlot Training History")
         utils.plot_training_history(history)
 
+    print("\nThe Model Summary:")
+    print(locator.model.summary())
     print("\nPredict and Visualize")
     locator.predict_and_visualize(batch_size=3)
 

@@ -62,7 +62,7 @@ def execute_actual_object_detection():
         )
 
         print("\nFit The Model")
-        history = locator.train(batch_size=64, epochs=20, model_path=model_path)
+        history = locator.train(batch_size=64, epochs=50, model_path=model_path)
 
         print("\nPlot Training History")
         utils.plot_training_history(history)
@@ -70,7 +70,7 @@ def execute_actual_object_detection():
     print("\nThe Model Summary:")
     print(locator.model.summary())
     print("\nPredict and Visualize")
-    locator.predict_and_visualize(batch_size=3)
+    locator.predict_and_visualize(batch_size=6)
 
 def main(argv: Optional[list] = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]

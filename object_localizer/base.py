@@ -15,11 +15,21 @@ class Locator(ABC):
         self.alpha_bb = 1.0 # custom loss param: weight for bounding box coordinate loss
         self.beta_obj = 1.0 # custom loss param: weight for classification score loss
         self.gamma_obj = 0.5 # custom loss param: weight for objectness score loss
+        # NOTE: alpha_bb and beta_obj are scaled by num_cells after grid dims are computed
+        # (see below) to compensate for sample-weight dilution in grid-based training
         # Grid dimensions — VGG16 with 5 max-pools shrinks spatial dims by 2^5 = 32
         # For 200×200 input: 200/32 = 6.25 → VGG outputs (6,6,512)
         self.grid_h = self.image_height // 32  # 6 for 200px
         self.grid_w = self.image_width // 32   # 6 for 200px
         self.num_cells = self.grid_h * self.grid_w  # 36 cells total
+
+        # Compensate for grid sample-weight dilution:
+        # With 36 cells and only 1 responsible cell per image, Keras averages the
+        # sample-weighted loss over all 36 cells → bbox/class loss is diluted by 36×.
+        # Objectness has NO sample weight (all 36 cells train), so its gradient is
+        # ~36× stronger. Scaling alpha/beta by num_cells rebalances the gradients.
+        self.alpha_bb *= self.num_cells   # 1.0 × 36 = 36.0
+        self.beta_obj *= self.num_cells   # 1.0 × 36 = 36.0
     
     def build_vgg16_backbone_model(self, vgg_weights='imagenet', output_activation_func='sigmoid'):
         """Build common VGG16 backbone (no top, with custom head)."""

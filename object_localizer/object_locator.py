@@ -342,7 +342,8 @@ class ObjectLocator(Locator):
                            bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
 
                 print(f"  Cell [{cell_row},{cell_col}] → {class_pred_name} "
-                      f"(obj={obj_score:.3f}) bbox=({tx:.2f},{ty:.2f},{tw:.2f},{th:.2f})")
+                      f"(obj={obj_score:.3f}) bbox=({tx:.2f},{ty:.2f},{tw:.2f},{th:.2f}) "
+                      f"→ rect at ({rect_col0:.0f},{rect_row0:.0f}) size {obj_width:.0f}×{obj_height:.0f}px")
 
             print(f"\nImage {i+1} — {detected_count} cells activated (out of {self.num_cells})")
             print(f"  Ground truth (row0, col0, row1, col1): {original_coordinates}")

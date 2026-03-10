@@ -63,21 +63,23 @@ class Locator(ABC):
                 if any(layer.name.startswith(prefix) for prefix in unfreeze_prefixes):
                     layer.trainable = True
 
-        # Global Average Pooling: reduces (h, w, 512) → (512,) with far fewer params than Flatten
-        x = layers.GlobalAveragePooling2D()(vgg_base.output)
+        # === Localization path: Flatten preserves spatial info (WHERE things are) ===
+        loc_path = layers.Flatten()(vgg_base.output)
+        loc_path = layers.Dense(256, activation='relu')(loc_path)
+        loc_path = layers.BatchNormalization()(loc_path)
+        loc_path = layers.Dropout(0.3)(loc_path)
+        loc_path = layers.Dense(128, activation='relu')(loc_path)
+        loc_path = layers.BatchNormalization()(loc_path)
+        loc_path = layers.Dropout(0.5)(loc_path)
+        bbox_output = layers.Dense(4, activation='sigmoid', name='bbox_output')(loc_path)
 
-        # Shared hidden layers with BatchNorm for stable training
-        x = layers.Dense(256, activation='relu')(x)
-        x = layers.BatchNormalization()(x)
-        x = layers.Dropout(0.3)(x)
-        x = layers.Dense(128, activation='relu')(x)
-        x = layers.BatchNormalization()(x)
-        x = layers.Dropout(0.5)(x)
-
-        #seperate output heads for bounding box regression and multi-class classification and objecness
-        bbox_output = layers.Dense(4, activation='sigmoid', name='bbox_output')(x) # Location
-        class_output = layers.Dense(3, activation='softmax', name='class_output')(x) # Object class (3 classes in this example)
-        objectness_output = layers.Dense(1, activation='sigmoid', name='objectness_output')(x) # Objectness score (0 or 1)
+        # === Classification path: GAP focuses on WHAT is present (not where) ===
+        cls_path = layers.GlobalAveragePooling2D()(vgg_base.output)
+        cls_path = layers.Dense(128, activation='relu')(cls_path)
+        cls_path = layers.BatchNormalization()(cls_path)
+        cls_path = layers.Dropout(0.5)(cls_path)
+        class_output = layers.Dense(3, activation='softmax', name='class_output')(cls_path)
+        objectness_output = layers.Dense(1, activation='sigmoid', name='objectness_output')(cls_path)
 
         # Multi-output model: each head is a separate output with its own loss
         self.model = tf.keras.models.Model(

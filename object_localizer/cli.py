@@ -64,7 +64,7 @@ def execute_actual_object_detection():
         print(locator.model.summary())
 
         print("\nFit The Model")
-        history = locator.train(batch_size=64, epochs=50, model_path=model_path)
+        history = locator.train(batch_size=64, epochs=40, model_path=model_path)
 
         print("\nPlot Training History")
         utils.plot_training_history(history)

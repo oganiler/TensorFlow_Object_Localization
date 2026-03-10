@@ -28,6 +28,8 @@
     <Compile Include="object_localizer\object_locator.py" />
     <Compile Include="object_localizer\utils.py" />
     <Compile Include="object_localizer\white_box_locator.py" />
+    <Compile Include="visualize_architecture.py" />
+    <Compile Include="visualize_split_architecture.py" />
     <Compile Include="__main__.py" />
   </ItemGroup>
   <ItemGroup>

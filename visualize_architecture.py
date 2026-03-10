@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import numpy as np
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 10))
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 10))
 
 # Colors
 COLOR_BBOX = '#E74C3C'      # red
@@ -95,7 +95,7 @@ ax1.text(3.5, 0.0, 'Single weight matrix\n128 × 8 = 1,024 weights\n(all outputs
          ha='center', va='center', fontsize=9, style='italic',
          bbox=dict(boxstyle='round,pad=0.4', facecolor='#FFF3CD', edgecolor='#F0AD4E'))
 
-ax1.text(output_x, -0.6, 'Dense(8)\nsigmoid', ha='center', va='center', fontsize=10, fontweight='bold')
+ax1.text(output_x, -0.6, 'Dense(8)\nCustom Loss', ha='center', va='center', fontsize=10, fontweight='bold')
 
 # ============================================================
 # RIGHT PANEL: Separate Outputs approach

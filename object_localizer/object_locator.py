@@ -394,7 +394,7 @@ class ObjectLocator(Locator):
                       f"anchor {anchor_idx_d}) -> obj={all_obj_scores[idx]:.4f}")
 
             # === Phase 1: Collect all raw detections above threshold ===
-            obj_threshold = 0.5
+            obj_threshold = 0.6  # above sigmoid midpoint "uncertainty zone" (~0.5)
             raw_detections = []
             for slot_idx in range(self.total_anchors):
                 obj_score = obj_preds[i, slot_idx, 0]

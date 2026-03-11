@@ -33,6 +33,13 @@ class Locator(ABC):
         ]
         self.total_anchors = self.num_cells * self.num_anchors  # 36 × 3 = 108
 
+        # Objectness imbalance fix: with 108 slots and only 1 positive per image,
+        # the 107 negative slots overwhelm the single positive, causing the model
+        # to learn "always predict low objectness." Downweighting negative slots
+        # rebalances the gradient so the positive slot can actually train.
+        # Effective ratio: 1×1.0 (pos) vs 107×0.1 (neg) ≈ 1:10.7
+        self.noobj_weight = 0.1  # sample weight for negative objectness slots
+
         # Compensate for sample-weight dilution:
         # With 108 anchor slots and only 1 matched slot per image, Keras averages
         # the sample-weighted loss over all 108 slots → bbox/class loss diluted by 108×.

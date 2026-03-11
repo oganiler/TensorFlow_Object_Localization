@@ -233,10 +233,12 @@ class ObjectLocator(Locator):
                 Y_obj = np.zeros((batch_size, self.total_anchors, 1), dtype=np.float32)
                 # Per-slot sample weights: 1.0 at matched anchor slot, 0.0 elsewhere
                 # This masks bbox and class losses for empty anchor slots
-                # Objectness trains all slots equally → weight = 1.0 everywhere
                 W_bbox = np.zeros((batch_size, self.total_anchors), dtype=np.float32)
                 W_class = np.zeros((batch_size, self.total_anchors), dtype=np.float32)
-                W_obj = np.ones((batch_size, self.total_anchors), dtype=np.float32)
+                # Objectness weight: positive slots get 1.0, negative slots get noobj_weight
+                # This rebalances the 107:1 neg:pos ratio to prevent the model
+                # from learning "always predict low objectness"
+                W_obj = np.full((batch_size, self.total_anchors), self.noobj_weight, dtype=np.float32)
 
                 for i in range(batch_size):
                     x, targets, _ = self._create_random_location_for_actual_image()
@@ -245,8 +247,12 @@ class ObjectLocator(Locator):
                     Y_class[i] = targets['class_output']
                     Y_obj[i] = targets['objectness_output']
                     # objectness_output is (total_anchors, 1) — squeeze for sample weights
-                    W_bbox[i] = targets['objectness_output'][:, 0]
-                    W_class[i] = targets['objectness_output'][:, 0]
+                    obj_mask = targets['objectness_output'][:, 0]  # 1.0 at matched slot, 0.0 elsewhere
+                    W_bbox[i] = obj_mask
+                    W_class[i] = obj_mask
+                    # Positive objectness slots get full weight (1.0),
+                    # negatives keep the noobj_weight baseline set above
+                    W_obj[i] = np.where(obj_mask > 0.5, 1.0, self.noobj_weight)
 
                 # Keras 3 with TF backend: use tuples for multi-output targets/weights
                 # Order must match Model(outputs=[bbox_output, class_output, objectness_output])
@@ -367,11 +373,22 @@ class ObjectLocator(Locator):
             axes[i].imshow(X[i])
             original_coordinates = all_coordinates[i]
 
+            # === Diagnostics: objectness score distribution for this image ===
+            all_obj_scores = obj_preds[i, :, 0]
+            top5_indices = np.argsort(all_obj_scores)[-5:][::-1]
+            print(f"\nImage {i+1} — Top 5 objectness scores:")
+            for rank, idx in enumerate(top5_indices):
+                cell_idx_d = idx // self.num_anchors
+                anchor_idx_d = idx % self.num_anchors
+                print(f"  #{rank+1}: slot {idx} (cell {cell_idx_d}, anchor {anchor_idx_d}) "
+                      f"→ obj={all_obj_scores[idx]:.4f}")
+
             # === Phase 1: Collect all raw detections above threshold ===
+            obj_threshold = 0.3  # lowered from 0.5 to catch more detections
             raw_detections = []
             for slot_idx in range(self.total_anchors):
                 obj_score = obj_preds[i, slot_idx, 0]
-                if obj_score <= 0.5:
+                if obj_score <= obj_threshold:
                     continue
 
                 # Decode slot index → cell + anchor

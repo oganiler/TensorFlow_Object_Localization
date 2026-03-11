@@ -384,7 +384,7 @@ class ObjectLocator(Locator):
                       f"→ obj={all_obj_scores[idx]:.4f}")
 
             # === Phase 1: Collect all raw detections above threshold ===
-            obj_threshold = 0.3  # lowered from 0.5 to catch more detections
+            obj_threshold = 0.5  # restored: noobj_weight fix gives well-separated scores
             raw_detections = []
             for slot_idx in range(self.total_anchors):
                 obj_score = obj_preds[i, slot_idx, 0]
@@ -431,7 +431,10 @@ class ObjectLocator(Locator):
                 })
 
             # === Phase 2: Apply Non-Max Suppression ===
-            kept = self._non_max_suppression(raw_detections, iou_threshold=0.5)
+            # IoU threshold 0.3: more aggressive suppression to remove overlapping
+            # boxes with very different sizes (where IoU with the best box is low
+            # due to size mismatch, e.g. 52×56 vs 93×83 → IoU ≈ 0.38)
+            kept = self._non_max_suppression(raw_detections, iou_threshold=0.3)
 
             print(f"\nImage {i+1} — {len(raw_detections)} raw detections → "
                   f"{len(kept)} after NMS (out of {self.total_anchors} anchor slots)")

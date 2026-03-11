@@ -12,6 +12,7 @@
     <Name>TensorFlow_Object_Localization</Name>
     <RootNamespace>TensorFlow_Object_Localization</RootNamespace>
     <InterpreterId>CondaEnv|CondaEnv|env_tensor_flow_keras</InterpreterId>
+    <SuppressEnvironmentCreationPrompt>True</SuppressEnvironmentCreationPrompt>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
     <DebugSymbols>true</DebugSymbols>

@@ -80,9 +80,19 @@ class ObjectLocator(Locator):
 
         return bg[row_start:row_start + self.image_height, col_start:col_start + self.image_width, :]
 
+    @staticmethod
+    def _iou_wh(w1, h1, w2, h2):
+        """Compute IoU between two boxes centered at the same point, given only width/height.
+        Used for anchor matching — position doesn't matter, only shape overlap."""
+        inter_w = min(w1, w2)
+        inter_h = min(h1, h2)
+        inter = inter_w * inter_h
+        union = w1 * h1 + w2 * h2 - inter
+        return inter / (union + 1e-6)
+
     def _create_random_location_for_actual_image(self):
         """Load a random object image and put it on a random location against a random background.
-        Returns the image and grid-based targets (per-cell predictions, YOLO-style)."""
+        Returns the image and anchor-based grid targets (per-cell, per-anchor, YOLO-style)."""
 
         # get the number of object images available and select one randomly
         actual_obj_img = None
@@ -123,12 +133,12 @@ class ObjectLocator(Locator):
 
         # add random option whether the object will be placed in the image or not to create some negative samples (images with no objects)
         if np.random.rand() > 0.75:
-            # Return the background patch as is, with no object — all cells empty
+            # Return the background patch as is, with no object — all anchor slots empty
             x = x / 255.0  # Normalize to [0, 1]
             targets = {
-                'bbox_output': np.zeros((self.num_cells, 4), dtype=np.float32),
-                'class_output': np.zeros(self.num_cells, dtype=np.float32),
-                'objectness_output': np.zeros((self.num_cells, 1), dtype=np.float32)
+                'bbox_output': np.zeros((self.total_anchors, 4), dtype=np.float32),
+                'class_output': np.zeros(self.total_anchors, dtype=np.float32),
+                'objectness_output': np.zeros((self.total_anchors, 1), dtype=np.float32)
             }
             original_coordinates = np.array([0, 0, 0, 0])  # No object coordinates
             return x, targets, original_coordinates
@@ -162,7 +172,7 @@ class ObjectLocator(Locator):
 
         x = x / 255. # assuming image has 8 bit color (max 255)
 
-        # === YOLO-style cell-relative target encoding ===
+        # === YOLO-style cell-relative target encoding with ANCHOR MATCHING ===
         # Find object center
         center_row = (row0 + row1) / 2.0
         center_col = (col0 + col1) / 2.0
@@ -179,17 +189,29 @@ class ObjectLocator(Locator):
         # tw, th are object size relative to full image [0,1]
         tx = (center_col - resp_cell_col * cell_w) / cell_w  # offset within cell [0,1]
         ty = (center_row - resp_cell_row * cell_h) / cell_h  # offset within cell [0,1]
-        tw = (col1 - col0) / self.image_width                # width relative to image [0,1]
-        th = (row1 - row0) / self.image_height                # height relative to image [0,1]
+        obj_w = (col1 - col0) / self.image_width              # width relative to image [0,1]
+        obj_h = (row1 - row0) / self.image_height              # height relative to image [0,1]
 
-        # Build grid-shaped targets — all zeros except the responsible cell
-        bbox_targets = np.zeros((self.num_cells, 4), dtype=np.float32)
-        class_targets = np.zeros(self.num_cells, dtype=np.float32)
-        obj_targets = np.zeros((self.num_cells, 1), dtype=np.float32)
+        # Anchor matching: find the anchor whose shape best matches this object
+        best_anchor_idx = 0
+        best_iou = 0.0
+        for a_idx, (aw, ah) in enumerate(self.anchors):
+            iou = self._iou_wh(obj_w, obj_h, aw, ah)
+            if iou > best_iou:
+                best_iou = iou
+                best_anchor_idx = a_idx
 
-        bbox_targets[resp_cell_idx] = [tx, ty, tw, th]
-        class_targets[resp_cell_idx] = class_idx  # sparse class index (0, 1, or 2)
-        obj_targets[resp_cell_idx] = 1.0           # object exists in this cell
+        # Flat index into (total_anchors,) arrays: cell_idx * num_anchors + anchor_idx
+        flat_idx = resp_cell_idx * self.num_anchors + best_anchor_idx
+
+        # Build targets — all zeros except the matched anchor slot
+        bbox_targets = np.zeros((self.total_anchors, 4), dtype=np.float32)
+        class_targets = np.zeros(self.total_anchors, dtype=np.float32)
+        obj_targets = np.zeros((self.total_anchors, 1), dtype=np.float32)
+
+        bbox_targets[flat_idx] = [tx, ty, obj_w, obj_h]
+        class_targets[flat_idx] = class_idx  # sparse class index (0, 1, or 2)
+        obj_targets[flat_idx] = 1.0           # object exists at this anchor slot
 
         targets = {
             'bbox_output': bbox_targets,
@@ -200,19 +222,21 @@ class ObjectLocator(Locator):
         return x, targets, original_coordinates
 
     def image_generator(self, batch_size=64):
-        # generate image input and the grid-based targets to train randomly
+        # generate image input and anchor-based grid targets to train randomly
         num_of_batches =  self.steps_per_epoch
         while True:
             # Each epoch will have num_of_batches
             for _ in range(num_of_batches):
                 X = np.zeros((batch_size, *self.input_shape))
-                Y_bbox = np.zeros((batch_size, self.num_cells, 4), dtype=np.float32)
-                Y_class = np.zeros((batch_size, self.num_cells), dtype=np.float32)
-                Y_obj = np.zeros((batch_size, self.num_cells, 1), dtype=np.float32)
-                # Per-cell sample weights: 1.0 at responsible cell, 0.0 elsewhere
-                # This masks bbox and class losses for cells with no object
-                W_bbox = np.zeros((batch_size, self.num_cells), dtype=np.float32)
-                W_class = np.zeros((batch_size, self.num_cells), dtype=np.float32)
+                Y_bbox = np.zeros((batch_size, self.total_anchors, 4), dtype=np.float32)
+                Y_class = np.zeros((batch_size, self.total_anchors), dtype=np.float32)
+                Y_obj = np.zeros((batch_size, self.total_anchors, 1), dtype=np.float32)
+                # Per-slot sample weights: 1.0 at matched anchor slot, 0.0 elsewhere
+                # This masks bbox and class losses for empty anchor slots
+                # Objectness trains all slots equally → weight = 1.0 everywhere
+                W_bbox = np.zeros((batch_size, self.total_anchors), dtype=np.float32)
+                W_class = np.zeros((batch_size, self.total_anchors), dtype=np.float32)
+                W_obj = np.ones((batch_size, self.total_anchors), dtype=np.float32)
 
                 for i in range(batch_size):
                     x, targets, _ = self._create_random_location_for_actual_image()
@@ -220,14 +244,16 @@ class ObjectLocator(Locator):
                     Y_bbox[i] = targets['bbox_output']
                     Y_class[i] = targets['class_output']
                     Y_obj[i] = targets['objectness_output']
-                    # objectness_output is (num_cells, 1) — squeeze to (num_cells,) for sample weights
+                    # objectness_output is (total_anchors, 1) — squeeze for sample weights
                     W_bbox[i] = targets['objectness_output'][:, 0]
                     W_class[i] = targets['objectness_output'][:, 0]
 
+                # Keras 3 with TF backend: use tuples for multi-output targets/weights
+                # Order must match Model(outputs=[bbox_output, class_output, objectness_output])
                 yield (
                     X,
-                    {'bbox_output': Y_bbox, 'class_output': Y_class, 'objectness_output': Y_obj},
-                    {'bbox_output': W_bbox, 'class_output': W_class}
+                    (Y_bbox, Y_class, Y_obj),
+                    (W_bbox, W_class, W_obj)
                 )
 
     def train(self, batch_size=64, epochs=50, model_path='object_locator_model.keras'):
@@ -258,11 +284,54 @@ class ObjectLocator(Locator):
             print(f"No saved model found at {model_path}")
             return False
 
-    def predict_and_visualize(self, batch_size=1):
-        """Predict bounding boxes on random images and draw ALL activated cell predictions.
+    @staticmethod
+    def _compute_iou_boxes(box1, box2):
+        """Compute IoU between two boxes in (col0, row0, col1, row1) format."""
+        inter_col0 = max(box1[0], box2[0])
+        inter_row0 = max(box1[1], box2[1])
+        inter_col1 = min(box1[2], box2[2])
+        inter_row1 = min(box1[3], box2[3])
+        inter_area = max(0, inter_col1 - inter_col0) * max(0, inter_row1 - inter_row0)
+        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        return inter_area / (area1 + area2 - inter_area + 1e-6)
 
-        Without NMS, multiple overlapping boxes may appear around the object — this is
-        expected and shows the raw per-cell output of the grid.
+    @staticmethod
+    def _non_max_suppression(detections, iou_threshold=0.5):
+        """Greedy NMS: suppress overlapping boxes, keeping the highest-confidence ones.
+
+        Args:
+            detections: list of dicts with keys 'box' (col0,row0,col1,row1), 'score',
+                        'class_name', 'color', 'anchor_idx', 'cell_row', 'cell_col',
+                        'width', 'height', 'rect_col0', 'rect_row0'
+            iou_threshold: IoU threshold above which a lower-confidence box is suppressed.
+
+        Returns:
+            Filtered list of detections (survivors only).
+        """
+        if len(detections) == 0:
+            return []
+
+        # Sort by objectness score descending
+        detections = sorted(detections, key=lambda d: d['score'], reverse=True)
+        keep = []
+
+        while detections:
+            best = detections.pop(0)
+            keep.append(best)
+            # Remove any remaining detection that overlaps too much with the kept one
+            detections = [
+                d for d in detections
+                if ObjectLocator._compute_iou_boxes(best['box'], d['box']) < iou_threshold
+            ]
+
+        return keep
+
+    def predict_and_visualize(self, batch_size=1):
+        """Predict bounding boxes with anchor boxes, apply NMS, and visualize.
+
+        Each cell has num_anchors predictions. NMS filters duplicate/overlapping boxes,
+        keeping only the most confident detections.
 
         Args:
             batch_size: Number of images to predict and visualize.
@@ -279,7 +348,7 @@ class ObjectLocator(Locator):
             all_coordinates.append(coords)
 
         # Predict the entire batch at once — returns list of 3 arrays:
-        # [bbox_preds(batch,36,4), class_preds(batch,36,3), obj_preds(batch,36,1)]
+        # [bbox_preds(batch,108,4), class_preds(batch,108,3), obj_preds(batch,108,1)]
         bbox_preds, class_preds, obj_preds = self.model.predict(X)
 
         # Grid cell dimensions in pixels
@@ -297,59 +366,80 @@ class ObjectLocator(Locator):
         for i in range(batch_size):
             axes[i].imshow(X[i])
             original_coordinates = all_coordinates[i]
-            detected_count = 0
 
-            # Loop through all 36 cells — draw boxes for any cell with objectness > 0.5
-            for cell_idx in range(self.num_cells):
-                obj_score = obj_preds[i, cell_idx, 0]
+            # === Phase 1: Collect all raw detections above threshold ===
+            raw_detections = []
+            for slot_idx in range(self.total_anchors):
+                obj_score = obj_preds[i, slot_idx, 0]
                 if obj_score <= 0.5:
                     continue
 
-                detected_count += 1
-
-                # Decode cell-relative bbox → image coordinates
+                # Decode slot index → cell + anchor
+                cell_idx = slot_idx // self.num_anchors
+                anchor_idx = slot_idx % self.num_anchors
                 cell_row = cell_idx // self.grid_w
                 cell_col = cell_idx % self.grid_w
 
-                tx, ty, tw, th = bbox_preds[i, cell_idx]
+                tx, ty, tw, th = bbox_preds[i, slot_idx]
 
-                # Center of object in image coordinates
+                # Decode cell-relative bbox → image coordinates
                 center_col = (cell_col + tx) * cell_w
                 center_row = (cell_row + ty) * cell_h
                 obj_width = tw * self.image_width
                 obj_height = th * self.image_height
 
-                # Top-left corner for Rectangle (col, row)
+                # Corner coordinates for NMS IoU computation
                 rect_col0 = center_col - obj_width / 2
                 rect_row0 = center_row - obj_height / 2
+                rect_col1 = rect_col0 + obj_width
+                rect_row1 = rect_row0 + obj_height
 
-                # Class prediction for this cell
-                class_pred_idx = np.argmax(class_preds[i, cell_idx])
+                # Class prediction for this anchor slot
+                class_pred_idx = np.argmax(class_preds[i, slot_idx])
                 class_pred_name = self.class_names[class_pred_idx]
                 color = class_colors[class_pred_idx % len(class_colors)]
 
-                # Draw box with transparency based on confidence
-                alpha = float(np.clip(obj_score, 0.3, 1.0))
-                rect = Rectangle(
-                    (rect_col0, rect_row0), obj_width, obj_height,
-                    linewidth=2, edgecolor=color, facecolor='none', alpha=alpha)
-                axes[i].add_patch(rect)
+                raw_detections.append({
+                    'box': (rect_col0, rect_row0, rect_col1, rect_row1),
+                    'score': float(obj_score),
+                    'class_name': class_pred_name,
+                    'color': color,
+                    'anchor_idx': anchor_idx,
+                    'cell_row': cell_row,
+                    'cell_col': cell_col,
+                    'width': obj_width,
+                    'height': obj_height,
+                    'rect_col0': rect_col0,
+                    'rect_row0': rect_row0,
+                })
 
-                # Label with class name and confidence
-                axes[i].text(rect_col0, rect_row0 - 2,
-                           f"{class_pred_name} {obj_score:.2f}",
-                           fontsize=6, color=color, fontweight='bold',
-                           bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
+            # === Phase 2: Apply Non-Max Suppression ===
+            kept = self._non_max_suppression(raw_detections, iou_threshold=0.5)
 
-                print(f"  Cell [{cell_row},{cell_col}] → {class_pred_name} "
-                      f"(obj={obj_score:.3f}) bbox=({tx:.2f},{ty:.2f},{tw:.2f},{th:.2f}) "
-                      f"→ rect at ({rect_col0:.0f},{rect_row0:.0f}) size {obj_width:.0f}×{obj_height:.0f}px")
-
-            print(f"\nImage {i+1} — {detected_count} cells activated (out of {self.num_cells})")
+            print(f"\nImage {i+1} — {len(raw_detections)} raw detections → "
+                  f"{len(kept)} after NMS (out of {self.total_anchors} anchor slots)")
             print(f"  Ground truth (row0, col0, row1, col1): {original_coordinates}")
 
-            title = f"Image {i+1}: {detected_count} detections"
-            if detected_count == 0:
+            # === Phase 3: Draw surviving boxes ===
+            for d in kept:
+                alpha = float(np.clip(d['score'], 0.3, 1.0))
+                rect = Rectangle(
+                    (d['rect_col0'], d['rect_row0']), d['width'], d['height'],
+                    linewidth=2, edgecolor=d['color'], facecolor='none', alpha=alpha)
+                axes[i].add_patch(rect)
+
+                # Label with class name, confidence, and anchor index
+                axes[i].text(d['rect_col0'], d['rect_row0'] - 2,
+                           f"{d['class_name']} {d['score']:.2f} (a{d['anchor_idx']})",
+                           fontsize=6, color=d['color'], fontweight='bold',
+                           bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
+
+                print(f"  Cell [{d['cell_row']},{d['cell_col']}] anchor {d['anchor_idx']} → "
+                      f"{d['class_name']} (obj={d['score']:.3f}) "
+                      f"box {d['width']:.0f}×{d['height']:.0f}px")
+
+            title = f"Image {i+1}: {len(kept)} detections"
+            if len(kept) == 0:
                 title = f"Image {i+1} — No Object Detected"
             axes[i].set_title(title)
 

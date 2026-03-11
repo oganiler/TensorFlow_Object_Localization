@@ -15,21 +15,31 @@ class Locator(ABC):
         self.alpha_bb = 1.0 # custom loss param: weight for bounding box coordinate loss
         self.beta_obj = 1.0 # custom loss param: weight for classification score loss
         self.gamma_obj = 0.5 # custom loss param: weight for objectness score loss
-        # NOTE: alpha_bb and beta_obj are scaled by num_cells after grid dims are computed
-        # (see below) to compensate for sample-weight dilution in grid-based training
+
         # Grid dimensions — VGG16 with 5 max-pools shrinks spatial dims by 2^5 = 32
         # For 200×200 input: 200/32 = 6.25 → VGG outputs (6,6,512)
         self.grid_h = self.image_height // 32  # 6 for 200px
         self.grid_w = self.image_width // 32   # 6 for 200px
         self.num_cells = self.grid_h * self.grid_w  # 36 cells total
 
-        # Compensate for grid sample-weight dilution:
-        # With 36 cells and only 1 responsible cell per image, Keras averages the
-        # sample-weighted loss over all 36 cells → bbox/class loss is diluted by 36×.
-        # Objectness has NO sample weight (all 36 cells train), so its gradient is
-        # ~36× stronger. Scaling alpha/beta by num_cells rebalances the gradients.
-        self.alpha_bb *= self.num_cells   # 1.0 × 36 = 36.0
-        self.beta_obj *= self.num_cells   # 1.0 × 36 = 36.0
+        # Anchor boxes: each cell makes num_anchors predictions instead of 1
+        # Each anchor is (width, height) in image-relative coordinates [0,1]
+        self.num_anchors = 3
+        self.num_classes = 3
+        self.anchors = [
+            (0.20, 0.25),  # small  — covers ~1.0× scale objects
+            (0.30, 0.40),  # medium — covers ~1.5× scale objects
+            (0.45, 0.55),  # large  — covers ~2.0× scale objects
+        ]
+        self.total_anchors = self.num_cells * self.num_anchors  # 36 × 3 = 108
+
+        # Compensate for sample-weight dilution:
+        # With 108 anchor slots and only 1 matched slot per image, Keras averages
+        # the sample-weighted loss over all 108 slots → bbox/class loss diluted by 108×.
+        # Objectness has NO sample weight (all 108 slots train), so its gradient is
+        # ~108× stronger. Scaling alpha/beta by total_anchors rebalances the gradients.
+        self.alpha_bb *= self.total_anchors   # 1.0 × 108 = 108.0
+        self.beta_obj *= self.total_anchors   # 1.0 × 108 = 108.0
     
     def build_vgg16_backbone_model(self, vgg_weights='imagenet', output_activation_func='sigmoid'):
         """Build common VGG16 backbone (no top, with custom head)."""
@@ -87,22 +97,35 @@ class Locator(ABC):
         x = layers.BatchNormalization()(x)
         x = layers.Dropout(0.5)(x)
 
-        # 1x1 Conv2D output heads: predict per-cell → (grid_h, grid_w, filters)
-        # Each of the grid_h×grid_w cells makes its own independent prediction
-        bbox_conv = layers.Conv2D(4, (1, 1), activation='sigmoid', name='bbox_conv')(x)
-        # Reshape (6,6,4) → (36,4) — one bbox prediction per cell
-        bbox_output = layers.Reshape((self.num_cells, 4), name='bbox_output')(bbox_conv)
+        # 1x1 Conv2D output heads with ANCHOR BOXES
+        # Each cell predicts num_anchors boxes. Filters = num_anchors × values_per_anchor.
+        # Reshape flattens (grid_h, grid_w, num_anchors*V) → (total_anchors, V)
+        # where flat_idx = cell_idx * num_anchors + anchor_idx
 
-        class_conv = layers.Conv2D(3, (1, 1), activation='softmax', name='class_conv')(x)
-        # Reshape (6,6,3) → (36,3) — one class distribution per cell
-        class_output = layers.Reshape((self.num_cells, 3), name='class_output')(class_conv)
+        # Bbox: each anchor predicts [tx, ty, tw, th]
+        bbox_conv = layers.Conv2D(self.num_anchors * 4, (1, 1), activation='sigmoid',
+                                  name='bbox_conv')(x)
+        # (6,6,12) → (108,4) — one [tx,ty,tw,th] per anchor slot
+        bbox_output = layers.Reshape((self.total_anchors, 4), name='bbox_output')(bbox_conv)
 
-        obj_conv = layers.Conv2D(1, (1, 1), activation='sigmoid', name='obj_conv')(x)
-        # Reshape (6,6,1) → (36,1) — one objectness score per cell
-        objectness_output = layers.Reshape((self.num_cells, 1), name='objectness_output')(obj_conv)
+        # Class: each anchor predicts a class distribution
+        # NO activation on Conv2D — softmax must be applied AFTER reshape so each
+        # group of num_classes values (per anchor) is normalized independently
+        class_conv = layers.Conv2D(self.num_anchors * self.num_classes, (1, 1),
+                                   name='class_conv')(x)
+        # (6,6,9) → (108,3) then softmax on last dim → per-anchor class probabilities
+        class_reshaped = layers.Reshape((self.total_anchors, self.num_classes))(class_conv)
+        class_output = layers.Activation('softmax', name='class_output')(class_reshaped)
 
-        # Multi-output model: each head is a separate output with its own loss
-        # Output shapes: bbox(batch,36,4), class(batch,36,3), obj(batch,36,1)
+        # Objectness: each anchor predicts object existence
+        obj_conv = layers.Conv2D(self.num_anchors, (1, 1), activation='sigmoid',
+                                 name='obj_conv')(x)
+        # (6,6,3) → (108,1) — one objectness score per anchor slot
+        objectness_output = layers.Reshape((self.total_anchors, 1),
+                                           name='objectness_output')(obj_conv)
+
+        # Multi-output model with anchor boxes
+        # Output shapes: bbox(batch,108,4), class(batch,108,3), obj(batch,108,1)
         self.model = tf.keras.models.Model(
             inputs=vgg_base.input,
             outputs=[bbox_output, class_output, objectness_output]

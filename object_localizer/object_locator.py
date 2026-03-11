@@ -90,6 +90,19 @@ class ObjectLocator(Locator):
         union = w1 * h1 + w2 * h2 - inter
         return inter / (union + 1e-6)
 
+    def _slot_to_scale(self, slot_idx):
+        """Map a flat slot index to its scale dict and local index within that scale.
+
+        The flat index space is partitioned: [block3 slots | block4 slots | block5 slots].
+        Returns (scale_dict, local_idx) where local_idx is relative to that scale's offset.
+        """
+        for scale in self.scales:
+            if slot_idx < scale['offset'] + scale['num_slots']:
+                return scale, slot_idx - scale['offset']
+        # Fallback (should never reach here)
+        last = self.scales[-1]
+        return last, slot_idx - last['offset']
+
     def _create_random_location_for_actual_image(self):
         """Load a random object image and put it on a random location against a random background.
         Returns the image and anchor-based grid targets (per-cell, per-anchor, YOLO-style)."""
@@ -126,10 +139,6 @@ class ObjectLocator(Locator):
 
         # Get a random background patch as the canvas (instead of black)
         x = self._get_random_background_patch().astype(np.float64)
-
-        # Grid cell dimensions in pixels
-        cell_h = self.image_height / self.grid_h  # ~33.3 px for 200/6
-        cell_w = self.image_width / self.grid_w
 
         # add random option whether the object will be placed in the image or not to create some negative samples (images with no objects)
         if np.random.rand() > 0.75:
@@ -172,37 +181,41 @@ class ObjectLocator(Locator):
 
         x = x / 255. # assuming image has 8 bit color (max 255)
 
-        # === YOLO-style cell-relative target encoding with ANCHOR MATCHING ===
-        # Find object center
+        # === Multi-scale cell-relative target encoding with ANCHOR MATCHING ===
+        # Find object center and normalized dimensions
         center_row = (row0 + row1) / 2.0
         center_col = (col0 + col1) / 2.0
+        obj_w = (col1 - col0) / self.image_width   # width relative to image [0,1]
+        obj_h = (row1 - row0) / self.image_height   # height relative to image [0,1]
 
-        # Determine responsible cell (the cell whose region contains the object center)
-        resp_cell_row = int(center_row / cell_h)
-        resp_cell_col = int(center_col / cell_w)
-        # Clamp to grid bounds (safety)
-        resp_cell_row = min(resp_cell_row, self.grid_h - 1)
-        resp_cell_col = min(resp_cell_col, self.grid_w - 1)
-        resp_cell_idx = resp_cell_row * self.grid_w + resp_cell_col  # flat index 0..35
-
-        # Cell-relative bbox: tx, ty are center offsets within the responsible cell [0,1]
-        # tw, th are object size relative to full image [0,1]
-        tx = (center_col - resp_cell_col * cell_w) / cell_w  # offset within cell [0,1]
-        ty = (center_row - resp_cell_row * cell_h) / cell_h  # offset within cell [0,1]
-        obj_w = (col1 - col0) / self.image_width              # width relative to image [0,1]
-        obj_h = (row1 - row0) / self.image_height              # height relative to image [0,1]
-
-        # Anchor matching: find the anchor whose shape best matches this object
+        # Multi-scale anchor matching: find the best (scale, anchor) pair
+        # by comparing object shape against each scale's anchor shapes via IoU_wh.
+        # This determines WHICH feature map level detects this object.
+        best_scale_idx = 0
         best_anchor_idx = 0
         best_iou = 0.0
-        for a_idx, (aw, ah) in enumerate(self.anchors):
-            iou = self._iou_wh(obj_w, obj_h, aw, ah)
-            if iou > best_iou:
-                best_iou = iou
-                best_anchor_idx = a_idx
+        for s_idx, scale in enumerate(self.scales):
+            for a_idx, (aw, ah) in enumerate(scale['anchors']):
+                iou = self._iou_wh(obj_w, obj_h, aw, ah)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_scale_idx = s_idx
+                    best_anchor_idx = a_idx
 
-        # Flat index into (total_anchors,) arrays: cell_idx * num_anchors + anchor_idx
-        flat_idx = resp_cell_idx * self.num_anchors + best_anchor_idx
+        # Compute responsible cell within the MATCHED scale's grid
+        scale = self.scales[best_scale_idx]
+        cell_h = self.image_height / scale['grid_h']
+        cell_w = self.image_width / scale['grid_w']
+        resp_cell_row = min(int(center_row / cell_h), scale['grid_h'] - 1)
+        resp_cell_col = min(int(center_col / cell_w), scale['grid_w'] - 1)
+        resp_cell_idx = resp_cell_row * scale['grid_w'] + resp_cell_col
+
+        # Cell-relative bbox: tx, ty are center offsets within the responsible cell [0,1]
+        tx = (center_col - resp_cell_col * cell_w) / cell_w
+        ty = (center_row - resp_cell_row * cell_h) / cell_h
+
+        # Flat index using scale offset: [block3 slots | block4 slots | block5 slots]
+        flat_idx = scale['offset'] + resp_cell_idx * scale['num_anchors'] + best_anchor_idx
 
         # Build targets — all zeros except the matched anchor slot
         bbox_targets = np.zeros((self.total_anchors, 4), dtype=np.float32)
@@ -334,10 +347,10 @@ class ObjectLocator(Locator):
         return keep
 
     def predict_and_visualize(self, batch_size=1):
-        """Predict bounding boxes with anchor boxes, apply NMS, and visualize.
+        """Predict bounding boxes with multi-scale anchors, apply NMS, and visualize.
 
-        Each cell has num_anchors predictions. NMS filters duplicate/overlapping boxes,
-        keeping only the most confident detections.
+        Each scale's feature map produces predictions at its own grid resolution.
+        NMS filters duplicate/overlapping boxes across all scales.
 
         Args:
             batch_size: Number of images to predict and visualize.
@@ -354,12 +367,8 @@ class ObjectLocator(Locator):
             all_coordinates.append(coords)
 
         # Predict the entire batch at once — returns list of 3 arrays:
-        # [bbox_preds(batch,108,4), class_preds(batch,108,3), obj_preds(batch,108,1)]
+        # [bbox_preds(batch,805,4), class_preds(batch,805,3), obj_preds(batch,805,1)]
         bbox_preds, class_preds, obj_preds = self.model.predict(X)
-
-        # Grid cell dimensions in pixels
-        cell_h = self.image_height / self.grid_h
-        cell_w = self.image_width / self.grid_w
 
         # Color map for classes
         class_colors = ['r', 'g', 'b']  # one color per class
@@ -378,28 +387,34 @@ class ObjectLocator(Locator):
             top5_indices = np.argsort(all_obj_scores)[-5:][::-1]
             print(f"\nImage {i+1} — Top 5 objectness scores:")
             for rank, idx in enumerate(top5_indices):
-                cell_idx_d = idx // self.num_anchors
-                anchor_idx_d = idx % self.num_anchors
-                print(f"  #{rank+1}: slot {idx} (cell {cell_idx_d}, anchor {anchor_idx_d}) "
-                      f"→ obj={all_obj_scores[idx]:.4f}")
+                scale_d, local_d = self._slot_to_scale(idx)
+                cell_idx_d = local_d // scale_d['num_anchors']
+                anchor_idx_d = local_d % scale_d['num_anchors']
+                print(f"  #{rank+1}: slot {idx} ({scale_d['name']}, cell {cell_idx_d}, "
+                      f"anchor {anchor_idx_d}) -> obj={all_obj_scores[idx]:.4f}")
 
             # === Phase 1: Collect all raw detections above threshold ===
-            obj_threshold = 0.5  # restored: noobj_weight fix gives well-separated scores
+            obj_threshold = 0.5
             raw_detections = []
             for slot_idx in range(self.total_anchors):
                 obj_score = obj_preds[i, slot_idx, 0]
                 if obj_score <= obj_threshold:
                     continue
 
-                # Decode slot index → cell + anchor
-                cell_idx = slot_idx // self.num_anchors
-                anchor_idx = slot_idx % self.num_anchors
-                cell_row = cell_idx // self.grid_w
-                cell_col = cell_idx % self.grid_w
+                # Scale-aware decoding: determine which feature map produced this slot
+                scale, local_idx = self._slot_to_scale(slot_idx)
+                cell_idx = local_idx // scale['num_anchors']
+                anchor_idx = local_idx % scale['num_anchors']
+                cell_row = cell_idx // scale['grid_w']
+                cell_col = cell_idx % scale['grid_w']
+
+                # Cell dimensions for THIS scale's grid
+                cell_h = self.image_height / scale['grid_h']
+                cell_w = self.image_width / scale['grid_w']
 
                 tx, ty, tw, th = bbox_preds[i, slot_idx]
 
-                # Decode cell-relative bbox → image coordinates
+                # Decode cell-relative bbox -> image coordinates
                 center_col = (cell_col + tx) * cell_w
                 center_row = (cell_row + ty) * cell_h
                 obj_width = tw * self.image_width
@@ -428,15 +443,13 @@ class ObjectLocator(Locator):
                     'height': obj_height,
                     'rect_col0': rect_col0,
                     'rect_row0': rect_row0,
+                    'scale_name': scale['name'],
                 })
 
-            # === Phase 2: Apply Non-Max Suppression ===
-            # IoU threshold 0.3: more aggressive suppression to remove overlapping
-            # boxes with very different sizes (where IoU with the best box is low
-            # due to size mismatch, e.g. 52×56 vs 93×83 → IoU ≈ 0.38)
+            # === Phase 2: Apply Non-Max Suppression (cross-scale) ===
             kept = self._non_max_suppression(raw_detections, iou_threshold=0.3)
 
-            print(f"\nImage {i+1} — {len(raw_detections)} raw detections → "
+            print(f"\nImage {i+1} — {len(raw_detections)} raw detections -> "
                   f"{len(kept)} after NMS (out of {self.total_anchors} anchor slots)")
             print(f"  Ground truth (row0, col0, row1, col1): {original_coordinates}")
 
@@ -448,13 +461,14 @@ class ObjectLocator(Locator):
                     linewidth=2, edgecolor=d['color'], facecolor='none', alpha=alpha)
                 axes[i].add_patch(rect)
 
-                # Label with class name, confidence, and anchor index
+                # Label with class name, confidence, scale, and anchor index
                 axes[i].text(d['rect_col0'], d['rect_row0'] - 2,
-                           f"{d['class_name']} {d['score']:.2f} (a{d['anchor_idx']})",
+                           f"{d['class_name']} {d['score']:.2f} ({d['scale_name']})",
                            fontsize=6, color=d['color'], fontweight='bold',
                            bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
 
-                print(f"  Cell [{d['cell_row']},{d['cell_col']}] anchor {d['anchor_idx']} → "
+                print(f"  {d['scale_name']} cell [{d['cell_row']},{d['cell_col']}] "
+                      f"anchor {d['anchor_idx']} -> "
                       f"{d['class_name']} (obj={d['score']:.3f}) "
                       f"box {d['width']:.0f}×{d['height']:.0f}px")
 

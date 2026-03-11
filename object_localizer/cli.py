@@ -37,7 +37,7 @@ def execute_actual_object_detection():
     # Stage 2: actual object localization against black background
     print("\n=== Stage 2: Actual Object Localization ===")
 
-    model_path = 'object_locator_model.keras'
+    model_path = 'object_locator_multiscale_model.keras'
     locator = ObjectLocator(input_shape=(200, 200, 3), num_of_output = 8, steps_per_epoch = 50,
                             objects_dir = 'objects', backgrounds_dir='backgrounds')
 

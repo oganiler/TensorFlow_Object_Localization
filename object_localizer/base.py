@@ -16,37 +16,56 @@ class Locator(ABC):
         self.beta_obj = 1.0 # custom loss param: weight for classification score loss
         self.gamma_obj = 0.5 # custom loss param: weight for objectness score loss
 
-        # Grid dimensions — VGG16 with 5 max-pools shrinks spatial dims by 2^5 = 32
-        # For 200×200 input: 200/32 = 6.25 → VGG outputs (6,6,512)
-        self.grid_h = self.image_height // 32  # 6 for 200px
-        self.grid_w = self.image_width // 32   # 6 for 200px
-        self.num_cells = self.grid_h * self.grid_w  # 36 cells total
-
-        # Anchor boxes: each cell makes num_anchors predictions instead of 1
-        # Each anchor is (width, height) in image-relative coordinates [0,1]
-        self.num_anchors = 3
         self.num_classes = 3
-        self.anchors = [
-            (0.20, 0.25),  # small  — covers ~1.0× scale objects
-            (0.30, 0.40),  # medium — covers ~1.5× scale objects
-            (0.45, 0.55),  # large  — covers ~2.0× scale objects
-        ]
-        self.total_anchors = self.num_cells * self.num_anchors  # 36 × 3 = 108
 
-        # Objectness imbalance fix: with 108 slots and only 1 positive per image,
-        # the 107 negative slots overwhelm the single positive, causing the model
-        # to learn "always predict low objectness." Downweighting negative slots
-        # rebalances the gradient so the positive slot can actually train.
-        # Effective ratio: 1×1.0 (pos) vs 107×0.1 (neg) ≈ 1:10.7
-        self.noobj_weight = 0.1  # sample weight for negative objectness slots
+        # === SSD-style multi-scale detection ===
+        # Each VGG16 pooling layer produces a feature map at a different resolution.
+        # Smaller strides → finer grids → better for detecting small objects.
+        # Each scale gets 1 anchor tuned to the object sizes it's best at detecting.
+        #
+        # VGG16 pool layers for 200×200 input:
+        #   block3_pool: 25×25 (stride  8) — small objects
+        #   block4_pool: 12×12 (stride 16) — medium objects
+        #   block5_pool:  6×6  (stride 32) — large objects
+        self.scales = [
+            {'name': 'block3_pool',
+             'grid_h': self.image_height // 8,   # 25
+             'grid_w': self.image_width  // 8,   # 25
+             'anchors': [(0.15, 0.20)]},          # small objects
+            {'name': 'block4_pool',
+             'grid_h': self.image_height // 16,  # 12
+             'grid_w': self.image_width  // 16,  # 12
+             'anchors': [(0.30, 0.40)]},          # medium objects
+            {'name': 'block5_pool',
+             'grid_h': self.image_height // 32,  # 6
+             'grid_w': self.image_width  // 32,  # 6
+             'anchors': [(0.50, 0.55)]},          # large objects
+        ]
+
+        # Precompute per-scale metadata and cumulative flat-index offsets
+        # Flat layout: [block3 slots | block4 slots | block5 slots]
+        #              [0..624       | 625..768     | 769..804    ]
+        offset = 0
+        for s in self.scales:
+            s['num_cells']   = s['grid_h'] * s['grid_w']
+            s['num_anchors'] = len(s['anchors'])
+            s['num_slots']   = s['num_cells'] * s['num_anchors']
+            s['offset']      = offset
+            offset += s['num_slots']
+        self.total_anchors = offset  # 625 + 144 + 36 = 805
+
+        # Objectness imbalance fix — auto-scale to maintain ~1:10 pos/neg ratio.
+        # With 805 slots and 1 positive per image, hardcoded 0.1 would give
+        # 804×0.1 = 80.4 (way too much negative weight). Auto-scaling fixes this:
+        self.noobj_weight = 10.0 / (self.total_anchors - 1)
+        # 805 slots → 10.0/804 ≈ 0.012   (effective ratio 1:10)
+        # 108 slots → 10.0/107 ≈ 0.093   (same formula works for old config)
 
         # Compensate for sample-weight dilution:
-        # With 108 anchor slots and only 1 matched slot per image, Keras averages
-        # the sample-weighted loss over all 108 slots → bbox/class loss diluted by 108×.
-        # Objectness has NO sample weight (all 108 slots train), so its gradient is
-        # ~108× stronger. Scaling alpha/beta by total_anchors rebalances the gradients.
-        self.alpha_bb *= self.total_anchors   # 1.0 × 108 = 108.0
-        self.beta_obj *= self.total_anchors   # 1.0 × 108 = 108.0
+        # With N anchor slots and only 1 matched slot per image, Keras averages
+        # the sample-weighted loss over all N slots → bbox/class loss diluted by N×.
+        self.alpha_bb *= self.total_anchors   # 1.0 × 805 = 805.0
+        self.beta_obj *= self.total_anchors   # 1.0 × 805 = 805.0
     
     def build_vgg16_backbone_model(self, vgg_weights='imagenet', output_activation_func='sigmoid'):
         """Build common VGG16 backbone (no top, with custom head)."""
@@ -73,7 +92,11 @@ class Locator(ABC):
         self.model = tf.keras.models.Model(vgg_base.input, x)
 
     def build_vgg16_backbone_multiclass_model(self, vgg_weights='imagenet', unfreeze_last_n_blocks=0):
-        """Build common VGG16 backbone (no top, with custom head).
+        """Build SSD-style multi-scale VGG16 model.
+
+        Taps into block3_pool, block4_pool, and block5_pool feature maps.
+        Each scale gets its own independent conv head → bbox/class/objectness predictions.
+        All scales are concatenated into unified output tensors.
 
         Args:
             vgg_weights: Pretrained weights to use ('imagenet' or None).
@@ -95,44 +118,59 @@ class Locator(ABC):
                 if any(layer.name.startswith(prefix) for prefix in unfreeze_prefixes):
                     layer.trainable = True
 
-        # === Convolutional head: keeps (6,6) spatial grid alive ===
-        # VGG output: (batch, 6, 6, 512) — no Flatten or GAP
-        x = layers.Conv2D(256, (3, 3), padding='same', activation='relu')(vgg_base.output)
-        x = layers.BatchNormalization()(x)
-        x = layers.Dropout(0.3)(x)
-        x = layers.Conv2D(128, (3, 3), padding='same', activation='relu')(x)
-        x = layers.BatchNormalization()(x)
-        x = layers.Dropout(0.5)(x)
+        # === SSD-style: extract intermediate feature maps from VGG16 ===
+        # Each pool layer provides features at a different spatial resolution:
+        #   block3_pool → (25, 25, 256)  stride  8 — fine grid for small objects
+        #   block4_pool → (12, 12, 512)  stride 16 — medium grid
+        #   block5_pool → ( 6,  6, 512)  stride 32 — coarse grid for large objects
+        feature_maps = [vgg_base.get_layer(s['name']).output for s in self.scales]
 
-        # 1x1 Conv2D output heads with ANCHOR BOXES
-        # Each cell predicts num_anchors boxes. Filters = num_anchors × values_per_anchor.
-        # Reshape flattens (grid_h, grid_w, num_anchors*V) → (total_anchors, V)
-        # where flat_idx = cell_idx * num_anchors + anchor_idx
+        # Build per-scale prediction heads, then concatenate across scales
+        all_bbox, all_class, all_obj = [], [], []
 
-        # Bbox: each anchor predicts [tx, ty, tw, th]
-        bbox_conv = layers.Conv2D(self.num_anchors * 4, (1, 1), activation='sigmoid',
-                                  name='bbox_conv')(x)
-        # (6,6,12) → (108,4) — one [tx,ty,tw,th] per anchor slot
-        bbox_output = layers.Reshape((self.total_anchors, 4), name='bbox_output')(bbox_conv)
+        for scale, feat in zip(self.scales, feature_maps):
+            sn = scale['name']  # e.g. 'block3_pool' — used as name prefix
+            na = scale['num_anchors']  # 1 per scale
+            ns = scale['num_slots']    # grid_h × grid_w × num_anchors
 
-        # Class: each anchor predicts a class distribution
-        # NO activation on Conv2D — softmax must be applied AFTER reshape so each
-        # group of num_classes values (per anchor) is normalized independently
-        class_conv = layers.Conv2D(self.num_anchors * self.num_classes, (1, 1),
-                                   name='class_conv')(x)
-        # (6,6,9) → (108,3) then softmax on last dim → per-anchor class probabilities
-        class_reshaped = layers.Reshape((self.total_anchors, self.num_classes))(class_conv)
-        class_output = layers.Activation('softmax', name='class_output')(class_reshaped)
+            # Per-scale convolutional head (independent weights per scale)
+            h = layers.Conv2D(256, (3, 3), padding='same', activation='relu',
+                              name=f'{sn}_conv1')(feat)
+            h = layers.BatchNormalization(name=f'{sn}_bn1')(h)
+            h = layers.Dropout(0.3, name=f'{sn}_drop1')(h)
+            h = layers.Conv2D(128, (3, 3), padding='same', activation='relu',
+                              name=f'{sn}_conv2')(h)
+            h = layers.BatchNormalization(name=f'{sn}_bn2')(h)
+            h = layers.Dropout(0.3, name=f'{sn}_drop2')(h)
 
-        # Objectness: each anchor predicts object existence
-        obj_conv = layers.Conv2D(self.num_anchors, (1, 1), activation='sigmoid',
-                                 name='obj_conv')(x)
-        # (6,6,3) → (108,1) — one objectness score per anchor slot
-        objectness_output = layers.Reshape((self.total_anchors, 1),
-                                           name='objectness_output')(obj_conv)
+            # Bbox head: [tx, ty, tw, th] per anchor, sigmoid to [0,1]
+            bbox = layers.Conv2D(na * 4, (1, 1), activation='sigmoid',
+                                 name=f'{sn}_bbox_conv')(h)
+            bbox = layers.Reshape((ns, 4), name=f'{sn}_bbox')(bbox)
+            all_bbox.append(bbox)
 
-        # Multi-output model with anchor boxes
-        # Output shapes: bbox(batch,108,4), class(batch,108,3), obj(batch,108,1)
+            # Class head: no activation on Conv2D → reshape → softmax per anchor
+            cls = layers.Conv2D(na * self.num_classes, (1, 1),
+                                name=f'{sn}_class_conv')(h)
+            cls = layers.Reshape((ns, self.num_classes),
+                                 name=f'{sn}_class_reshape')(cls)
+            cls = layers.Activation('softmax', name=f'{sn}_class')(cls)
+            all_class.append(cls)
+
+            # Objectness head: sigmoid, 1 score per anchor
+            obj = layers.Conv2D(na, (1, 1), activation='sigmoid',
+                                name=f'{sn}_obj_conv')(h)
+            obj = layers.Reshape((ns, 1), name=f'{sn}_obj')(obj)
+            all_obj.append(obj)
+
+        # Concatenate all scales → unified output tensors
+        # Flat layout: [block3 slots | block4 slots | block5 slots]
+        # Output shapes: bbox(batch,805,4), class(batch,805,3), obj(batch,805,1)
+        bbox_output = layers.Concatenate(axis=1, name='bbox_output')(all_bbox)
+        class_output = layers.Concatenate(axis=1, name='class_output')(all_class)
+        objectness_output = layers.Concatenate(axis=1,
+                                               name='objectness_output')(all_obj)
+
         self.model = tf.keras.models.Model(
             inputs=vgg_base.input,
             outputs=[bbox_output, class_output, objectness_output]
